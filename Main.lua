@@ -181,9 +181,15 @@ local function scan()
     assert(spacing < math.huge and spacing >= 4, "Could not calculate board spacing.")
     boardCenters = {}
     for _, square in ipairs(squares) do
+        local centerX = square.x
+        local centerY = square.y
+        if square.width >= spacing * 0.5 and square.height >= spacing * 0.5 then
+            centerX = centerX + square.width / 2
+            centerY = centerY + square.height / 2
+        end
         boardCenters[squareName(square.index)] = Vector2.new(
-            square.x + square.width / 2,
-            square.y + square.height / 2
+            centerX,
+            centerY
         )
     end
     local tokens, occupied = {}, {}
