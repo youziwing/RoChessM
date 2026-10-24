@@ -162,8 +162,7 @@ local function scan()
         local index = tonumber(square.Name:match("^S(%d+)$"))
         if index and index >= 1 and index <= 64 then
             local p = square.AbsolutePosition
-                local size = square.AbsoluteSize
-                squares[#squares + 1] = {index=index, x=p.X, y=p.Y, width=size.X, height=size.Y}
+            squares[#squares + 1] = {index=index, x=p.X, y=p.Y}
             byIndex[index] = squares[#squares]
         end
     end
@@ -181,12 +180,8 @@ local function scan()
     assert(spacing < math.huge and spacing >= 4, "Could not calculate board spacing.")
     boardCenters = {}
     for _, square in ipairs(squares) do
-        local centerX = square.x
-        local centerY = square.y
-        if square.width >= spacing * 0.5 and square.height >= spacing * 0.5 then
-            centerX = centerX + square.width / 2
-            centerY = centerY + square.height / 2
-        end
+        local centerX = square.x + spacing / 2
+        local centerY = square.y + spacing / 2
         boardCenters[squareName(square.index)] = Vector2.new(
             centerX,
             centerY
