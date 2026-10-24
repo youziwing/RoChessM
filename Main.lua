@@ -344,11 +344,22 @@ while true do
     local success, current = pcall(scan)
     if newGameRequested and success then
         pieceTypes = {}
+        local atStartingPosition = true
         for token, square in pairs(current) do
             pieceTypes[token] = pieceAtStart(square)
+            if not pieceTypes[token] then atStartingPosition = false end
+        end
+        if atStartingPosition then
+            local count = 0
+            for _ in pairs(pieceTypes) do count = count + 1 end
+            atStartingPosition = count == 32
         end
         previous = current
-        whiteToMove = true
+        if PLAY_AS == "Black" and not atStartingPosition then
+            whiteToMove = false
+        else
+            whiteToMove = true
+        end
         halfmove, fullmove = 0, 1
         awaitingImport = false
         initialAnalysisPending = true
@@ -485,4 +496,6 @@ while true do
         end
     end
 end
+
+
 
