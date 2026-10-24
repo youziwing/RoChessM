@@ -2,6 +2,8 @@
 local FLIP_BOARD = false
 local SCAN_DELAY = 0.15
 local API_URL = "https://rochess-gateway.vercel.app/api/analyze"
+local STATUS_URL = "https://rochess-gateway.vercel.app/api/status"
+local STATUS_INTERVAL = 10
 local API_KEY = ""
 local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
@@ -13,6 +15,8 @@ local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
 local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
+local lastStatusCheck = 0
+local lastAnnouncement = nil
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
@@ -254,6 +258,25 @@ local function askStockfish(fen)
     return result
 end
 
+local function checkAnnouncement()
+    local now = tick()
+    if now - lastStatusCheck < STATUS_INTERVAL then return end
+    lastStatusCheck = now
+    local ok, raw = pcall(function() return httpget(STATUS_URL) end)
+    if not ok or raw == "" then return end
+    local decoded, result = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not decoded or type(result) ~= "table" then return end
+    local announcement = tostring(result.announcement or "")
+    if announcement ~= "" and announcement ~= lastAnnouncement then
+        print("[RoChess Announcement] " .. announcement)
+        pcall(function() notify("RoChess Announcement", announcement, 8) end)
+    elseif announcement == "" and lastAnnouncement and lastAnnouncement ~= "" then
+        print("[RoChess Announcement] Server update complete")
+        pcall(function() notify("RoChess", "Server update complete", 5) end)
+    end
+    lastAnnouncement = announcement
+end
+
 local ok, previous = pcall(scan)
 if not ok then print("[Chess Detect] Initialization failed: " .. tostring(previous)); return end
 local pieceTypes, known = {}, 0
@@ -330,6 +353,7 @@ local function recommend(snapshot)
 end
 
 while true do
+    checkAnnouncement()
     if UI and UI.GetValue then
         local selected = UI.GetValue("chess_play_as")
         if selected == 0 then
@@ -441,6 +465,7 @@ while true do
                         to=promoted.to,
                         piece=promotionColor .. " " .. promotionKind
                     }
+                    print("[Chess] Promoted pawn: " .. promotionFrom .. " -> " .. promoted.to .. ", detected as " .. promotionColor .. " " .. promotionKind)
                     pendingPromotion = nil
                 end
             end
@@ -507,4 +532,3 @@ while true do
         end
     end
 end
-
