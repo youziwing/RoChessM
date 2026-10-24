@@ -419,16 +419,27 @@ while true do
                     pieceTypes[token] = nil
                 end
             end
-            if #moved == 0 and pendingPromotion and #added == 1 then
+            if #moved == 0 and #added == 1 then
                 local promoted = added[1]
-                if promoted.to == pendingPromotion.to then
-                    local color = pendingPromotion.to:sub(2, 2) == "8" and "White" or "Black"
-                    pieceTypes[promoted.token] = color .. " " .. pendingPromotion.kind
+                local promotionFrom, promotionColor, promotionKind
+                for _, gone in ipairs(removed) do
+                    local rank = tonumber(promoted.to:sub(2, 2))
+                    if gone.piece and gone.piece:find("Pawn")
+                        and (rank == 1 or rank == 8)
+                        and (not pendingPromotion or pendingPromotion.to == promoted.to) then
+                        promotionFrom = gone.from
+                        promotionColor = gone.piece:sub(1, 5)
+                        promotionKind = pendingPromotion and pendingPromotion.kind or "Queen"
+                        break
+                    end
+                end
+                if promotionFrom then
+                    pieceTypes[promoted.token] = promotionColor .. " " .. promotionKind
                     moved[1] = {
                         token=promoted.token,
-                        from=pendingPromotion.from,
+                        from=promotionFrom,
                         to=promoted.to,
-                        piece=color .. " " .. pendingPromotion.kind
+                        piece=promotionColor .. " " .. promotionKind
                     }
                     pendingPromotion = nil
                 end
