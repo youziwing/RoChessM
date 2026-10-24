@@ -136,6 +136,35 @@ local function pieceAtStart(square)
     if rank == 8 then return "Black " .. back[file] end
 end
 
+local function inferMissingPiece(snapshot, types)
+    local expected = {}
+    local files = {"a", "b", "c", "d", "e", "f", "g", "h"}
+    local back = {a="Rook", b="Knight", c="Bishop", d="Queen", e="King", f="Bishop", g="Knight", h="Rook"}
+    for _, file in ipairs(files) do
+        local kinds = {"White " .. back[file], "White Pawn", "Black Pawn", "Black " .. back[file]}
+        for _, kind in ipairs(kinds) do expected[kind] = (expected[kind] or 0) + 1 end
+    end
+    local unknown
+    for token in pairs(snapshot) do
+        local kind = types[token]
+        if kind then
+            expected[kind] = expected[kind] - 1
+        elseif unknown then
+            return
+        else
+            unknown = token
+        end
+    end
+    if unknown then
+        for kind, count in pairs(expected) do
+            if count == 1 then
+                types[unknown] = kind
+                return
+            end
+        end
+    end
+end
+
 local function pieceCode(pieceType)
     local color, kind = pieceType:match("^(%a+) (.+)$")
     local codes = {Pawn="p", Knight="n", Bishop="b", Rook="r", Queen="q", King="k"}
@@ -373,6 +402,7 @@ while true do
             pieceTypes[token] = pieceAtStart(square)
             if not pieceTypes[token] then atStartingPosition = false end
         end
+        inferMissingPiece(current, pieceTypes)
         if atStartingPosition then
             local count = 0
             for _ in pairs(pieceTypes) do count = count + 1 end
@@ -465,7 +495,6 @@ while true do
                         to=promoted.to,
                         piece=promotionColor .. " " .. promotionKind
                     }
-                    print("[Chess] Promoted pawn: " .. promotionFrom .. " -> " .. promoted.to .. ", detected as " .. promotionColor .. " " .. promotionKind)
                     pendingPromotion = nil
                 end
             end
@@ -532,3 +561,4 @@ while true do
         end
     end
 end
+
