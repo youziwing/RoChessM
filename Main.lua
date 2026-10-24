@@ -302,6 +302,7 @@ local awaitingImport = known ~= 32
 local whiteToMove = startedAfterOpening and (PLAY_AS == "White") or (not startedAfterOpening)
 local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
+local pendingPromotion = nil
 
 local function recommend(snapshot)
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
@@ -316,6 +317,10 @@ local function recommend(snapshot)
         end
     end
     local promotion = result.bestmove:sub(5, 5):lower()
+    pendingPromotion = nil
+    if promotionNames[promotion] then
+        pendingPromotion = {from=fromSquare, to=toSquare, kind=promotionNames[promotion]}
+    end
     local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
@@ -387,14 +392,34 @@ while true do
         local stable, confirmed = pcall(scan)
         if stable and sameSnapshot(current, confirmed) then
             local moved, capture = {}, false
+            local added, removed = {}, {}
             for token, newSquare in pairs(confirmed) do
                 local oldSquare = previous[token]
-                if oldSquare and oldSquare ~= newSquare then moved[#moved + 1] = {token=token, from=oldSquare, to=newSquare, piece=pieceTypes[token]} end
+                if oldSquare and oldSquare ~= newSquare then
+                    moved[#moved + 1] = {token=token, from=oldSquare, to=newSquare, piece=pieceTypes[token]}
+                elseif not oldSquare then
+                    added[#added + 1] = {token=token, to=newSquare}
+                end
             end
             for token in pairs(previous) do
                 if not confirmed[token] then
                     capture = true
+                    removed[#removed + 1] = {token=token, from=previous[token], piece=pieceTypes[token]}
                     pieceTypes[token] = nil
+                end
+            end
+            if #moved == 0 and pendingPromotion and #added == 1 then
+                local promoted = added[1]
+                if promoted.to == pendingPromotion.to then
+                    local color = pendingPromotion.to:sub(2, 2) == "8" and "White" or "Black"
+                    pieceTypes[promoted.token] = color .. " " .. pendingPromotion.kind
+                    moved[1] = {
+                        token=promoted.token,
+                        from=pendingPromotion.from,
+                        to=promoted.to,
+                        piece=color .. " " .. pendingPromotion.kind
+                    }
+                    pendingPromotion = nil
                 end
             end
             if #moved > 0 then
@@ -418,6 +443,7 @@ while true do
                     if destinationRank == 1 or destinationRank == 8 then
                         local color = move.piece:sub(1, 5)
                         pieceTypes[move.token] = color .. " Queen"
+                        pendingPromotion = nil
                     end
                 end
                 whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
