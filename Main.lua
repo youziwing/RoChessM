@@ -415,6 +415,7 @@ local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
+local initialAnalysisEarliest = tick() + 0.75
 
 local function recommend(snapshot)
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
@@ -520,7 +521,7 @@ while true do
             or (PLAY_AS == "White" and whiteToMove)
             or (PLAY_AS == "Black" and not whiteToMove)
         if shouldAnalyze then
-            if tick() >= analysisRetryAt and recommend(previous) then
+            if tick() >= initialAnalysisEarliest and tick() >= analysisRetryAt and recommend(previous) then
                 initialAnalysisPending = false
             end
         else
