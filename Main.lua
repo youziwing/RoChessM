@@ -1,5 +1,7 @@
 
 local FLIP_BOARD = false
+local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
+_G.__ROCHESS_SESSION = ROCHESS_SESSION
 local SCAN_DELAY = 0.15
 local API_URL = "https://rochess-gateway.vercel.app/api/analyze"
 local STATUS_URL = "https://rochess-gateway.vercel.app/api/status"
@@ -447,7 +449,7 @@ local function recommend(snapshot)
     return true
 end
 
-while true do
+while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
     if UI and UI.GetValue then
         local selected = UI.GetValue("chess_play_as")
