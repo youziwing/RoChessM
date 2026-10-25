@@ -334,8 +334,16 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     local rights = castlingRights == "" and "-" or castlingRights
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
-local function askStockfish(fen)
-    local body = HttpService:JSONEncode({fen=fen, strength=STRENGTH})
+local function positionKey(fen)
+    local fields = {}
+    for field in fen:gmatch("[^%s]+") do fields[#fields + 1] = field end
+    return table.concat({fields[1] or "", fields[2] or "", fields[3] or "", fields[4] or ""}, " ")
+end
+
+local function askStockfish(fen, avoidMoves)
+    local request = {fen=fen, strength=STRENGTH}
+    if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
+    local body = HttpService:JSONEncode(request)
     local headers = nil
     if API_KEY ~= "" then
         headers = { ["X-API-Key"] = API_KEY }
@@ -346,6 +354,20 @@ local function askStockfish(fen)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
+end
+
+local function askWithRepetitionGuard(fen)
+    local key = positionKey(fen)
+    local previousBest = bestMoveByPosition[key]
+    local avoidMoves = previousBest and {previousBest} or nil
+    local result, errorMessage = askStockfish(fen, avoidMoves)
+    if result and result.bestmove then
+        if previousBest and result.bestmove ~= previousBest then
+            print("[Stockfish] Repetition detected; alternative move selected")
+        end
+        bestMoveByPosition[key] = result.bestmove
+    end
+    return result, errorMessage
 end
 
 local function checkAnnouncement()
@@ -417,11 +439,12 @@ local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
+local bestMoveByPosition = {}
 local initialAnalysisEarliest = tick() + 0.75
 
 local function recommend(snapshot)
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
-    local result, errorMessage = askStockfish(fen)
+    local result, errorMessage = askWithRepetitionGuard(fen)
     if not result or not result.bestmove then
         print("[Stockfish] unavailable: " .. tostring(errorMessage or "No best move returned"))
         analysisRetryAt = tick() + 2
