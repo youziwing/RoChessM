@@ -513,7 +513,35 @@ while true do
         pendingFen = nil
         continue
     end
-    if awaitingImport then
+    if awaitingImport and success then
+        local candidateTypes, completeStartingBoard = {}, true
+        for token, square in pairs(current) do
+            candidateTypes[token] = pieceAtStart(square)
+            if not candidateTypes[token] then completeStartingBoard = false end
+        end
+        if completeStartingBoard then
+            inferMissingPiece(current, candidateTypes)
+            local count = 0
+            for token in pairs(candidateTypes) do
+                if candidateTypes[token] then count = count + 1 end
+            end
+            if count == 32 then
+                pieceTypes = candidateTypes
+                previous = current
+                whiteToMove = true
+                halfmove, fullmove = 0, 1
+                castlingRights, enPassantTarget = "KQkq", "-"
+                awaitingImport = false
+                initialAnalysisPending = true
+                analysisRetryAt = tick()
+                importStatus = "Starting position detected"
+                print("[Chess Detect] Starting position detected")
+            end
+        end
+        if awaitingImport then
+            continue
+        end
+    elseif awaitingImport then
         continue
     end
     if initialAnalysisPending then
