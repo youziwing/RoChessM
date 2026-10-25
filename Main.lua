@@ -65,12 +65,20 @@ if UI and UI.AddTab then
         settings:Combo("chess_strength", "Strength", {"Low", "Medium", "High"}, 2, function(_, text)
             STRENGTH = string.lower(text)
         end)
-        settings:InputText("chess_target_elo", "Target Elo (800-3000, optional)", "", function(text)
+        local eloInput = settings:InputText("chess_target_elo", "Target Elo (800-3000, optional)", "", function() end)
+        settings:Button("Apply Target Elo", function()
+            local text = ""
+            local widgetOk, widgetText = pcall(function() return eloInput:GetValue() end)
+            if widgetOk and widgetText then text = widgetText end
+            local uiText = UI.GetValue("chess_target_elo")
+            if uiText and uiText ~= "" then text = uiText end
             local value = tonumber(text)
             if value then
                 TARGET_ELO = math.max(800, math.min(3000, math.floor(value + 0.5)))
+                print("[Chess] Target Elo set to " .. tostring(TARGET_ELO) .. " (applies to the next analysis)")
             else
                 TARGET_ELO = nil
+                print("[Chess] Target Elo cleared; using preset strength")
             end
         end)
         settings:Text("Target Elo overrides the preset strength.")
