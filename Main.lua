@@ -232,10 +232,29 @@ local function scan()
     assert(#squares == 64, "Expected 64 squares named S1 through S64.")
     local first = byIndex[1]
     local spacing = first and math.min(first.w, first.h) or 0
-    assert(spacing >= 4, "Could not calculate board spacing.")
+    if spacing < 4 and byIndex[2] then
+        spacing = math.abs(byIndex[2].x - byIndex[1].x)
+    end
+    if spacing < 4 and byIndex[9] then
+        spacing = math.abs(byIndex[9].y - byIndex[1].y)
+    end
+    if spacing < 4 then
+        local nearest = math.huge
+        for i = 1, #squares do
+            for j = i + 1, #squares do
+                local dx, dy = squares[i].x - squares[j].x, squares[i].y - squares[j].y
+                local distance = math.sqrt(dx * dx + dy * dy)
+                if distance >= 4 and distance < nearest then nearest = distance end
+            end
+        end
+        spacing = nearest
+    end
+    assert(spacing < math.huge and spacing >= 4, "Could not calculate board spacing.")
     boardCenters = {}
     for _, square in ipairs(squares) do
-        boardCenters[squareName(square.index)] = Vector2.new(square.x + square.w / 2, square.y + square.h / 2)
+        local width = square.w >= 4 and square.w or spacing
+        local height = square.h >= 4 and square.h or spacing
+        boardCenters[squareName(square.index)] = Vector2.new(square.x + width / 2, square.y + height / 2)
     end
     local tokens, occupied = {}, {}
     for _, piece in ipairs(pieceFolder:GetChildren()) do
