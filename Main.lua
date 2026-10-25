@@ -414,11 +414,16 @@ local whiteToMove = startedAfterOpening and (PLAY_AS == "White") or (not started
 local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
+local analysisRetryAt = 0
 
 local function recommend(snapshot)
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
-    local result = askStockfish(fen)
-    if not result or not result.bestmove then return end
+    local result, errorMessage = askStockfish(fen)
+    if not result or not result.bestmove then
+        print("[Stockfish] unavailable: " .. tostring(errorMessage or "No best move returned"))
+        analysisRetryAt = tick() + 2
+        return false
+    end
     local fromSquare, toSquare = result.bestmove:sub(1, 2), result.bestmove:sub(3, 4)
     local wantedPiece = "Unknown piece"
     for token, square in pairs(snapshot) do
@@ -438,6 +443,7 @@ local function recommend(snapshot)
     showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
     local backend = result.backend == "local" and "Local" or "Render"
     print("[Stockfish " .. backend .. "] " .. message)
+    return true
 end
 
 while true do
@@ -513,8 +519,13 @@ while true do
         local shouldAnalyze = PLAY_AS == "Any"
             or (PLAY_AS == "White" and whiteToMove)
             or (PLAY_AS == "Black" and not whiteToMove)
-        if shouldAnalyze then recommend(previous) end
-        initialAnalysisPending = false
+        if shouldAnalyze then
+            if tick() >= analysisRetryAt and recommend(previous) then
+                initialAnalysisPending = false
+            end
+        else
+            initialAnalysisPending = false
+        end
     end
     if success and not sameSnapshot(previous, current) then
         wait(SCAN_DELAY)
