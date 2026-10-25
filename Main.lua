@@ -9,6 +9,7 @@ local STATUS_INTERVAL = 10
 local API_KEY = ""
 local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
+local TARGET_ELO = nil
 local PLAY_AS = "White" -- "White", "Black", or "Any"
 local boardCenters = {}
 local arrows = {}
@@ -64,6 +65,15 @@ if UI and UI.AddTab then
         settings:Combo("chess_strength", "Strength", {"Low", "Medium", "High"}, 2, function(_, text)
             STRENGTH = string.lower(text)
         end)
+        settings:InputText("chess_target_elo", "Target Elo (800-3000, optional)", "", function(text)
+            local value = tonumber(text)
+            if value then
+                TARGET_ELO = math.max(800, math.min(3000, math.floor(value + 0.5)))
+            else
+                TARGET_ELO = nil
+            end
+        end)
+        settings:Text("Target Elo overrides the preset strength.")
         settings:Text("Select your color before playing.")
         settings:Text("Best move: green arrow")
         settings:Button("New Game", function()
@@ -342,6 +352,7 @@ end
 
 local function askStockfish(fen, avoidMoves)
     local request = {fen=fen, strength=STRENGTH}
+    if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
     local body = HttpService:JSONEncode(request)
     local headers = nil
