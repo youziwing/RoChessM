@@ -17,6 +17,8 @@ local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
 local lastStatusCheck = 0
 local lastAnnouncement = nil
+local castlingRights = "KQkq"
+local enPassantTarget = "-"
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
@@ -68,7 +70,6 @@ if UI and UI.AddTab then
         local position = tab:Section("Position Import", "Right")
         local fenInput = position:InputText("chess_fen", "FEN position", "", function(text)
             enteredFen = text or ""
-            pendingFen = text
         end)
         position:Button("Import Position", function()
             local text = enteredFen
@@ -90,26 +91,48 @@ if UI and UI.AddTab then
 end
 
 local function fenPieces(fen)
+    assert(type(fen) == "string" and fen ~= "", "Invalid FEN: empty input")
     local fields = {}
     for field in fen:gmatch("[^%s]+") do fields[#fields + 1] = field end
-    assert(#fields >= 2, "Invalid FEN")
-    local result, rank = {}, 8
+    assert(#fields >= 2 and #fields <= 6, "Invalid FEN: expected 2 to 6 fields")
+    assert(fields[2] == "w" or fields[2] == "b", "Invalid FEN: side to move must be w or b")
+    local result, whiteKing, blackKing = {}, 0, 0
+    local rank, ranks = 8, 0
     for row in fields[1]:gmatch("[^/]+") do
+        ranks = ranks + 1
+        assert(rank >= 1, "Invalid FEN: too many ranks")
         local file = 1
         for char in row:gmatch(".") do
             local count = tonumber(char)
             if count then
+                assert(count >= 1 and count <= 8, "Invalid FEN: bad empty-square count")
                 file = file + count
             else
+                local lower = char:lower()
                 local names = {p="Pawn", n="Knight", b="Bishop", r="Rook", q="Queen", k="King"}
+                assert(names[lower] ~= nil and char:match("^[pnbrqkPNBRQK]$"), "Invalid FEN: unknown piece")
+                assert(file <= 8, "Invalid FEN: rank has more than 8 files")
                 local color = char == char:upper() and "White" or "Black"
-                result[string.char(96 + file) .. tostring(rank)] = color .. " " .. names[char:lower()]
+                result[string.char(96 + file) .. tostring(rank)] = color .. " " .. names[lower]
+                if lower == "k" then
+                    if color == "White" then whiteKing = whiteKing + 1 else blackKing = blackKing + 1 end
+                end
                 file = file + 1
             end
         end
+        assert(file == 9, "Invalid FEN: each rank must contain exactly 8 files")
         rank = rank - 1
     end
-    return result, fields[2] == "w"
+    assert(ranks == 8 and rank == 0, "Invalid FEN: expected exactly 8 ranks")
+    assert(whiteKing == 1 and blackKing == 1, "Invalid FEN: position must contain one king per side")
+    local rights = fields[3] or "-"
+    assert(rights == "-" or rights:match("^[KQkq]+$"), "Invalid FEN: bad castling rights")
+    local ep = fields[4] or "-"
+    assert(ep == "-" or ep:match("^[a-h][36]$"), "Invalid FEN: bad en-passant square")
+    local half, full = tonumber(fields[5] or "0"), tonumber(fields[6] or "1")
+    assert(half and half >= 0 and half % 1 == 0, "Invalid FEN: bad halfmove clock")
+    assert(full and full >= 1 and full % 1 == 0, "Invalid FEN: bad fullmove number")
+    return result, fields[2] == "w", rights, ep, half, full
 end
 
 local Players = game:GetService("Players")
@@ -172,14 +195,21 @@ local function pieceCode(pieceType)
     return color == "White" and string.upper(code) or code
 end
 
+local cachedSquareFolder, cachedPieceFolder
 local function getBoard()
+    if cachedSquareFolder and cachedPieceFolder then return cachedSquareFolder, cachedPieceFolder end
     local gui = child(player, "PlayerGui")
-    local board = child(child(child(gui, "ChessUI"), "Root"), "Board")
-    local squares, pieces = child(board, "Squares"), child(board, "Pieces")
-    assert(squares and pieces, "Chess board not found. Open RoChess first.")
-    return squares, pieces
+    for _ = 1, 80 do
+        local board = child(child(child(gui, "ChessUI"), "Root"), "Board")
+        local squares, pieces = child(board, "Squares"), child(board, "Pieces")
+        if squares and pieces then
+            cachedSquareFolder, cachedPieceFolder = squares, pieces
+            return squares, pieces
+        end
+        wait(0.1)
+    end
+    error("Chess board not found. Open RoChess first.")
 end
-
 local function getToken(piece)
     local ok, address = pcall(function() return piece.Address end)
     if ok and type(address) == "number" and address > 0 then
@@ -194,31 +224,18 @@ local function scan()
     for _, square in ipairs(squareFolder:GetChildren()) do
         local index = tonumber(square.Name:match("^S(%d+)$"))
         if index and index >= 1 and index <= 64 then
-            local p = square.AbsolutePosition
-            squares[#squares + 1] = {index=index, x=p.X, y=p.Y}
+            local p, size = square.AbsolutePosition, square.AbsoluteSize
+            squares[#squares + 1] = {index=index, x=p.X, y=p.Y, w=size.X, h=size.Y}
             byIndex[index] = squares[#squares]
         end
     end
     assert(#squares == 64, "Expected 64 squares named S1 through S64.")
-    local spacing = math.huge
-    for i = 1, #squares do
-        for j = i + 1, #squares do
-            local dx, dy = squares[i].x - squares[j].x, squares[i].y - squares[j].y
-            local d = math.sqrt(dx * dx + dy * dy)
-            if d > 1 and d < spacing then
-                spacing = d
-            end
-        end
-    end
-    assert(spacing < math.huge and spacing >= 4, "Could not calculate board spacing.")
+    local first = byIndex[1]
+    local spacing = first and math.min(first.w, first.h) or 0
+    assert(spacing >= 4, "Could not calculate board spacing.")
     boardCenters = {}
     for _, square in ipairs(squares) do
-        local centerX = square.x + spacing / 2
-        local centerY = square.y + spacing / 2
-        boardCenters[squareName(square.index)] = Vector2.new(
-            centerX,
-            centerY
-        )
+        boardCenters[squareName(square.index)] = Vector2.new(square.x + square.w / 2, square.y + square.h / 2)
     end
     local tokens, occupied = {}, {}
     for _, piece in ipairs(pieceFolder:GetChildren()) do
@@ -226,10 +243,8 @@ local function scan()
             local p, nearest, best = piece.AbsolutePosition, nil, math.huge
             for _, square in ipairs(squares) do
                 local dx, dy = p.X - square.x, p.Y - square.y
-                local d = math.sqrt(dx * dx + dy * dy)
-                if d < best then
-                    nearest, best = square.index, d
-                end
+                local dist = math.sqrt(dx * dx + dy * dy)
+                if dist < best then nearest, best = square.index, dist end
             end
             assert(nearest and best <= spacing * 0.4, "Piece is moving; wait for animation.")
             local name = squareName(nearest)
@@ -241,7 +256,6 @@ local function scan()
     end
     return tokens
 end
-
 local function sameSnapshot(a, b)
     for token, square in pairs(a) do
         if b[token] ~= square then return false end
@@ -252,11 +266,37 @@ local function sameSnapshot(a, b)
     return true
 end
 
+local function updateMoveState(move, removed)
+    enPassantTarget = "-"
+    if not move or not move.piece then return end
+    local color, kind, from, to = move.piece:sub(1, 5), move.piece:sub(7), move.from, move.to
+    if kind == "King" then
+        if color == "White" then castlingRights = castlingRights:gsub("K", ""):gsub("Q", "")
+        else castlingRights = castlingRights:gsub("k", ""):gsub("q", "") end
+    elseif kind == "Rook" then
+        if from == "a1" then castlingRights = castlingRights:gsub("Q", "") end
+        if from == "h1" then castlingRights = castlingRights:gsub("K", "") end
+        if from == "a8" then castlingRights = castlingRights:gsub("q", "") end
+        if from == "h8" then castlingRights = castlingRights:gsub("k", "") end
+    end
+    for _, gone in ipairs(removed or {}) do
+        if gone.piece and gone.piece:sub(7) == "Rook" then
+            if gone.from == "a1" then castlingRights = castlingRights:gsub("Q", "") end
+            if gone.from == "h1" then castlingRights = castlingRights:gsub("K", "") end
+            if gone.from == "a8" then castlingRights = castlingRights:gsub("q", "") end
+            if gone.from == "h8" then castlingRights = castlingRights:gsub("k", "") end
+        end
+    end
+    if castlingRights == "" then castlingRights = "-" end
+    if kind == "Pawn" then
+        local a, b = tonumber(from:sub(2, 2)), tonumber(to:sub(2, 2))
+        if a and b and math.abs(b - a) == 2 then enPassantTarget = to:sub(1, 1) .. tostring((a + b) / 2) end
+    end
+end
+
 local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     local board = {}
-    for token, square in pairs(snapshot) do
-        if pieceTypes[token] then board[square] = pieceCode(pieceTypes[token]) end
-    end
+    for token, square in pairs(snapshot) do if pieceTypes[token] then board[square] = pieceCode(pieceTypes[token]) end end
     local ranks = {}
     for rank = 8, 1, -1 do
         local row, empty = "", 0
@@ -270,9 +310,9 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
         if empty > 0 then row = row .. tostring(empty) end
         ranks[#ranks + 1] = row
     end
-    return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " - - " .. tostring(halfmove) .. " " .. tostring(fullmove)
+    local rights = castlingRights == "" and "-" or castlingRights
+    return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
-
 local function askStockfish(fen)
     local body = HttpService:JSONEncode({fen=fen, strength=STRENGTH})
     local headers = nil
@@ -415,6 +455,7 @@ while true do
             whiteToMove = true
         end
         halfmove, fullmove = 0, 1
+        castlingRights, enPassantTarget = "KQkq", "-"
         awaitingImport = false
         initialAnalysisPending = true
         pendingFen = nil
@@ -424,11 +465,15 @@ while true do
         continue
     end
     if pendingFen and success then
-        local imported, position, side = pcall(fenPieces, pendingFen)
+        local imported, position, side, rights, ep, importedHalf, importedFull = pcall(fenPieces, pendingFen)
         if imported then
+            pieceTypes = {}
             for token, square in pairs(current) do
+                assert(position[square], "Imported FEN does not match the visible board")
                 pieceTypes[token] = position[square]
             end
+            castlingRights, enPassantTarget = rights, ep
+            halfmove, fullmove = importedHalf, importedFull
             previous = current
             whiteToMove = side
             awaitingImport = false
@@ -473,6 +518,7 @@ while true do
                     pieceTypes[token] = nil
                 end
             end
+            local promotionWasDetected = false
             if #moved == 0 and #added == 1 then
                 local promoted = added[1]
                 local promotionFrom, promotionColor, promotionKind
@@ -496,24 +542,20 @@ while true do
                         piece=promotionColor .. " " .. promotionKind
                     }
                     pendingPromotion = nil
+                    promotionWasDetected = true
                 end
             end
             if #moved > 0 then
                 local move = moved[1]
-                if PLAY_AS == "White" or PLAY_AS == "Black" then
-                    local wantedColor = PLAY_AS == "White" and "Black" or "White"
+                if #moved > 1 then
                     for _, candidate in ipairs(moved) do
-                        if candidate.piece and candidate.piece:sub(1, 5) == wantedColor then
+                        if candidate.piece and candidate.piece:sub(7) == "King" then
                             move = candidate
                             break
                         end
                     end
-                    if not (move.piece and move.piece:sub(1, 5) == wantedColor) then
-                        previous = confirmed
-                        continue
-                    end
                 end
-                local wasPawn = move.piece and move.piece:find("Pawn") ~= nil
+                local wasPawn = move.piece and (move.piece:find("Pawn") ~= nil or promotionWasDetected)
                 if wasPawn then
                     local destinationRank = tonumber(move.to:sub(2, 2))
                     if destinationRank == 1 or destinationRank == 8 then
@@ -522,6 +564,7 @@ while true do
                         pendingPromotion = nil
                     end
                 end
+                updateMoveState(move, removed)
                 whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
                 if wasPawn or capture then
                     halfmove = 0
@@ -554,6 +597,8 @@ while true do
                         showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
                         local backend = result.backend == "local" and "Local" or "Render"
                         print("[Stockfish " .. backend .. "] " .. message)
+                    elseif errorMessage then
+                        print("[Stockfish] unavailable: " .. tostring(errorMessage))
                     end
                 end
             end
