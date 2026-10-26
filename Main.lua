@@ -688,9 +688,33 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 if whiteToMove then
                     fullmove = fullmove + 1
                 end
-                -- Refresh the complete principal variation after every move,
-                -- including the opponent's move, so engine vision stays visible.
-                recommend(confirmed)
+                local yourTurn = PLAY_AS == "Any"
+                    or (PLAY_AS == "White" and whiteToMove)
+                    or (PLAY_AS == "Black" and not whiteToMove)
+                if yourTurn then
+                    local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
+                    local result, errorMessage = askStockfish(fen)
+                    if result then
+                        local fromSquare = result.bestmove:sub(1, 2)
+                        local toSquare = result.bestmove:sub(3, 4)
+                        local wantedPiece = "Unknown piece"
+                        for token, square in pairs(confirmed) do
+                            if square == fromSquare and pieceTypes[token] then
+                                wantedPiece = pieceTypes[token]
+                                break
+                            end
+                        end
+                        local promotion = result.bestmove:sub(5, 5):lower()
+                        local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
+                        local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
+                        removeArrow()
+                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+                        local backend = result.backend == "local" and "Local" or "Render"
+                        print("[Stockfish " .. backend .. "] " .. message)
+                    elseif errorMessage then
+                        print("[Stockfish] unavailable: " .. tostring(errorMessage))
+                    end
+                end
             end
             previous = confirmed
         end
