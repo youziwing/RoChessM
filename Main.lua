@@ -464,9 +464,32 @@ local function recommend(snapshot)
     local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
-    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+    local principal = result.pv
+    local shown = 0
+    if type(principal) == "table" then
+        for index = 1, math.min(#principal, 5) do
+            local lineMove = tostring(principal[index]):match("([a-h][1-8][a-h][1-8][qrbn]?)")
+            if lineMove then
+                local lineColor = index == 1
+                    and Color3.fromRGB(40, 220, 80)
+                    or Color3.fromRGB(255, 190, 40)
+                showArrow(lineMove:sub(1, 2), lineMove:sub(3, 4), lineColor)
+                shown = shown + 1
+            end
+        end
+    end
+    if shown == 0 then
+        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+    end
     local backend = result.backend == "local" and "Local" or "Render"
     print("[Stockfish " .. backend .. "] " .. message)
+    if shown > 1 then
+        local pvText = {}
+        for index = 1, math.min(#principal, 5) do
+            pvText[#pvText + 1] = tostring(principal[index])
+        end
+        print("[Stockfish " .. backend .. "] PV: " .. table.concat(pvText, " "))
+    end
     return true
 end
 
