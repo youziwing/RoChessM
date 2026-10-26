@@ -25,8 +25,9 @@ local enPassantTarget = "-"
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
-        arrow.Line:Remove()
-        arrow.Head:Remove()
+        pcall(function() arrow.Line:Remove() end)
+        pcall(function() arrow.Head:Remove() end)
+        pcall(function() arrow.Label:Remove() end)
     end
     arrows = {}
 end
@@ -39,21 +40,29 @@ local function showArrow(fromSquare, toSquare, color)
     if length < 1 then return end
     local ux, uy = dx / length, dy / length
     local px, py = -uy, ux
-    local tip = toPoint
-    local left = Vector2.new(toPoint.X - ux * 18 + px * 9, toPoint.Y - uy * 18 + py * 9)
-    local right = Vector2.new(toPoint.X - ux * 18 - px * 9, toPoint.Y - uy * 18 - py * 9)
+    local number = #arrows + 1
     local arrowLine = Drawing.new("Line")
     arrowLine.From = fromPoint
-    arrowLine.To = Vector2.new(toPoint.X - ux * 8, toPoint.Y - uy * 8)
+    arrowLine.To = Vector2.new(toPoint.X - ux * 11, toPoint.Y - uy * 11)
     arrowLine.Color = color
-    arrowLine.Thickness = 4
+    arrowLine.Thickness = 6
     arrowLine.Visible = true
     local arrowHead = Drawing.new("Triangle")
-    arrowHead.PointA, arrowHead.PointB, arrowHead.PointC = tip, left, right
+    arrowHead.PointA = toPoint
+    arrowHead.PointB = Vector2.new(toPoint.X - ux * 25 + px * 12, toPoint.Y - uy * 25 + py * 12)
+    arrowHead.PointC = Vector2.new(toPoint.X - ux * 25 - px * 12, toPoint.Y - uy * 25 - py * 12)
     arrowHead.Color = color
     arrowHead.Filled = true
     arrowHead.Visible = true
-    arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead}
+    local label = Drawing.new("Text")
+    label.Text = tostring(number)
+    label.Position = Vector2.new(fromPoint.X + 7, fromPoint.Y - 20)
+    label.Size = 16
+    label.Center = true
+    label.Outline = true
+    label.Color = color
+    label.Visible = true
+    arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead, Label = label}
 end
 
 if UI and UI.AddTab then
