@@ -377,6 +377,7 @@ local function askStockfish(fen, avoidMoves)
 end
 
 local function askWithRepetitionGuard(fen)
+    bestMoveByPosition = bestMoveByPosition or {}
     local key = positionKey(fen)
     local previousBest = bestMoveByPosition[key]
     local avoidMoves = previousBest and {previousBest} or nil
