@@ -25,9 +25,8 @@ local enPassantTarget = "-"
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
-        pcall(function() arrow.Line:Remove() end)
-        pcall(function() arrow.Head:Remove() end)
-        pcall(function() arrow.Label:Remove() end)
+        arrow.Line:Remove()
+        arrow.Head:Remove()
     end
     arrows = {}
 end
@@ -40,29 +39,21 @@ local function showArrow(fromSquare, toSquare, color)
     if length < 1 then return end
     local ux, uy = dx / length, dy / length
     local px, py = -uy, ux
-    local number = #arrows + 1
+    local tip = toPoint
+    local left = Vector2.new(toPoint.X - ux * 18 + px * 9, toPoint.Y - uy * 18 + py * 9)
+    local right = Vector2.new(toPoint.X - ux * 18 - px * 9, toPoint.Y - uy * 18 - py * 9)
     local arrowLine = Drawing.new("Line")
     arrowLine.From = fromPoint
-    arrowLine.To = Vector2.new(toPoint.X - ux * 11, toPoint.Y - uy * 11)
+    arrowLine.To = Vector2.new(toPoint.X - ux * 8, toPoint.Y - uy * 8)
     arrowLine.Color = color
-    arrowLine.Thickness = 6
+    arrowLine.Thickness = 4
     arrowLine.Visible = true
     local arrowHead = Drawing.new("Triangle")
-    arrowHead.PointA = toPoint
-    arrowHead.PointB = Vector2.new(toPoint.X - ux * 25 + px * 12, toPoint.Y - uy * 25 + py * 12)
-    arrowHead.PointC = Vector2.new(toPoint.X - ux * 25 - px * 12, toPoint.Y - uy * 25 - py * 12)
+    arrowHead.PointA, arrowHead.PointB, arrowHead.PointC = tip, left, right
     arrowHead.Color = color
     arrowHead.Filled = true
     arrowHead.Visible = true
-    local label = Drawing.new("Text")
-    label.Text = tostring(number)
-    label.Position = Vector2.new(fromPoint.X + 7, fromPoint.Y - 20)
-    label.Size = 16
-    label.Center = true
-    label.Outline = true
-    label.Color = color
-    label.Visible = true
-    arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead, Label = label}
+    arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead}
 end
 
 if UI and UI.AddTab then
@@ -473,32 +464,9 @@ local function recommend(snapshot)
     local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
-    local principal = result.pv
-    local shown = 0
-    if type(principal) == "table" then
-        for index = 1, math.min(#principal, 5) do
-            local lineMove = tostring(principal[index]):match("([a-h][1-8][a-h][1-8][qrbn]?)")
-            if lineMove then
-                local lineColor = index == 1
-                    and Color3.fromRGB(40, 220, 80)
-                    or Color3.fromRGB(255, 190, 40)
-                showArrow(lineMove:sub(1, 2), lineMove:sub(3, 4), lineColor)
-                shown = shown + 1
-            end
-        end
-    end
-    if shown == 0 then
-        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
-    end
+    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
     local backend = result.backend == "local" and "Local" or "Render"
     print("[Stockfish " .. backend .. "] " .. message)
-    if shown > 1 then
-        local pvText = {}
-        for index = 1, math.min(#principal, 5) do
-            pvText[#pvText + 1] = tostring(principal[index])
-        end
-        print("[Stockfish " .. backend .. "] PV: " .. table.concat(pvText, " "))
-    end
     return true
 end
 
