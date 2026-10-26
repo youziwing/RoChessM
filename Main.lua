@@ -20,6 +20,7 @@ local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
 local lastStatusCheck = 0
 local lastAnnouncement = nil
+local bestMoveByPosition = {}
 local castlingRights = "KQkq"
 local enPassantTarget = "-"
 
@@ -458,7 +459,6 @@ local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
-local bestMoveByPosition = {}
 local initialAnalysisEarliest = tick() + 0.75
 
 local function recommend(snapshot)
