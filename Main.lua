@@ -11,6 +11,7 @@ local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
 local TARGET_ELO = nil
 local PLAY_AS = "White" -- "White", "Black", or "Any"
+local AUTO_DETECT_COLOR = true
 local boardCenters = {}
 local arrows = {}
 local pendingFen = nil
@@ -230,6 +231,22 @@ local function getBoard()
     end
     error("Chess board not found. Open RoChess first.")
 end
+
+local function detectPlayAs()
+    local squares = cachedSquareFolder
+    local coords = squares and squares.Parent and squares.Parent:FindFirstChild("Coords")
+    local rank1 = coords and coords:FindFirstChild("Rank1")
+    local file1 = coords and coords:FindFirstChild("File1")
+    if not rank1 or not file1 then return nil end
+    local ok, rankText, fileText = pcall(function()
+        return tostring(rank1.Text), tostring(file1.Text):lower()
+    end)
+    if not ok then return nil end
+    if rankText == "8" and fileText == "a" then return "White" end
+    if rankText == "1" and fileText == "h" then return "Black" end
+    return nil
+end
+
 local function getToken(piece)
     local ok, address = pcall(function() return piece.Address end)
     if ok and type(address) == "number" and address > 0 then
@@ -472,7 +489,13 @@ end
 
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
-    if UI and UI.GetValue then
+    if AUTO_DETECT_COLOR then
+        local detected = detectPlayAs()
+        if detected and detected ~= PLAY_AS then
+            PLAY_AS = detected
+            print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
+        end
+    elseif UI and UI.GetValue then
         local selected = UI.GetValue("chess_play_as")
         if selected == 0 then
             PLAY_AS = "White"
