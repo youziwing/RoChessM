@@ -14,6 +14,9 @@ local PLAY_AS = "White" -- "White", "Black", or "Any"
 local AUTO_DETECT_COLOR = true
 local boardCenters = {}
 local arrows = {}
+local promotionLabel = nil
+local lastRequestAt = 0
+local REQUEST_COOLDOWN = 0.35
 local pendingFen = nil
 local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
@@ -30,9 +33,13 @@ local function removeArrow()
         arrow.Head:Remove()
     end
     arrows = {}
+    if promotionLabel then
+        pcall(function() promotionLabel:Remove() end)
+        promotionLabel = nil
+    end
 end
 
-local function showArrow(fromSquare, toSquare, color)
+local function showArrow(fromSquare, toSquare, color, promotionText)
     local fromPoint, toPoint = boardCenters[fromSquare], boardCenters[toSquare]
     if not fromPoint or not toPoint or not Drawing then return end
     local dx, dy = toPoint.X - fromPoint.X, toPoint.Y - fromPoint.Y
@@ -55,6 +62,18 @@ local function showArrow(fromSquare, toSquare, color)
     arrowHead.Filled = true
     arrowHead.Visible = true
     arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead}
+    if promotionText then
+        local label = Drawing.new("Text")
+        label.Text = "Promote to " .. promotionText
+        label.Size = 14
+        label.Font = Drawing.Fonts.SystemBold
+        label.Color = color
+        label.Outline = true
+        label.Center = true
+        label.Position = Vector2.new(toPoint.X, toPoint.Y + 18)
+        label.Visible = true
+        promotionLabel = label
+    end
 end
 
 if UI and UI.AddTab then
@@ -370,6 +389,10 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
 local function askStockfish(fen, avoidMoves)
+    if tick() - lastRequestAt < REQUEST_COOLDOWN then
+        return nil, "Analysis request throttled"
+    end
+    lastRequestAt = tick()
     local request = {fen=fen, strength=STRENGTH}
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
@@ -455,6 +478,7 @@ local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
+local lastAnalyzedFen = nil
 local initialAnalysisEarliest = tick() + 0.75
 
 local function recommend(snapshot)
@@ -465,6 +489,8 @@ local function recommend(snapshot)
         analysisRetryAt = tick() + 2
         return false
     end
+    analysisRetryAt = 0
+    lastAnalyzedFen = fen
     local fromSquare, toSquare = result.bestmove:sub(1, 2), result.bestmove:sub(3, 4)
     local wantedPiece = "Unknown piece"
     for token, square in pairs(snapshot) do
@@ -481,7 +507,7 @@ local function recommend(snapshot)
     local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
-    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionNames[promotion])
     local backend = result.backend == "local" and "Local" or "Render"
     print("[Stockfish " .. backend .. "] " .. message)
     return true
@@ -602,6 +628,15 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             initialAnalysisPending = false
         end
     end
+    if not initialAnalysisPending and analysisRetryAt > 0 and tick() >= analysisRetryAt
+        and success and sameSnapshot(previous, current) then
+        local shouldRetry = PLAY_AS == "Any"
+            or (PLAY_AS == "White" and whiteToMove)
+            or (PLAY_AS == "Black" and not whiteToMove)
+        if shouldRetry and recommend(previous) then
+            analysisRetryAt = 0
+        end
+    end
     if success and not sameSnapshot(previous, current) then
         wait(SCAN_DELAY)
         local stable, confirmed = pcall(scan)
@@ -696,14 +731,16 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                             end
                         end
                         local promotion = result.bestmove:sub(5, 5):lower()
+                        pendingPromotion = promotionNames[promotion] and {from=fromSquare, to=toSquare, kind=promotionNames[promotion]} or nil
                         local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
-                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionNames[promotion])
                         local backend = result.backend == "local" and "Local" or "Render"
                         print("[Stockfish " .. backend .. "] " .. message)
                     elseif errorMessage then
                         print("[Stockfish] unavailable: " .. tostring(errorMessage))
+                        analysisRetryAt = tick() + 2
                     end
                 end
             end
@@ -711,4 +748,3 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         end
     end
 end
-
