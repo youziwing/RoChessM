@@ -22,6 +22,14 @@ local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
 local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
+
+local function promotionKind(result, bestmove)
+    local code = tostring(bestmove or ""):gsub("%s+", ""):sub(5, 5):lower()
+    if result and result.promotion then
+        code = tostring(result.promotion):sub(1, 1):lower()
+    end
+    return promotionNames[code]
+end
 local lastStatusCheck = 0
 local lastAnnouncement = nil
 local castlingRights = "KQkq"
@@ -70,6 +78,7 @@ local function showArrow(fromSquare, toSquare, color, promotionText)
         label.Color = color
         label.Outline = true
         label.Center = true
+        label.ZIndex = 1000
         label.Position = Vector2.new(toPoint.X, toPoint.Y + 18)
         label.Visible = true
         promotionLabel = label
@@ -491,7 +500,8 @@ local function recommend(snapshot)
     end
     analysisRetryAt = 0
     lastAnalyzedFen = fen
-    local fromSquare, toSquare = result.bestmove:sub(1, 2), result.bestmove:sub(3, 4)
+    local bestmove = tostring(result.bestmove):gsub("%s+", "")
+    local fromSquare, toSquare = bestmove:sub(1, 2), bestmove:sub(3, 4)
     local wantedPiece = "Unknown piece"
     for token, square in pairs(snapshot) do
         if square == fromSquare and pieceTypes[token] then
@@ -499,15 +509,15 @@ local function recommend(snapshot)
             break
         end
     end
-    local promotion = result.bestmove:sub(5, 5):lower()
+    local promotedTo = promotionKind(result, bestmove)
     pendingPromotion = nil
-    if promotionNames[promotion] then
-        pendingPromotion = {from=fromSquare, to=toSquare, kind=promotionNames[promotion]}
+    if promotedTo then
+        pendingPromotion = {from=fromSquare, to=toSquare, kind=promotedTo}
     end
-    local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
+    local suffix = promotedTo and " (promote to " .. promotedTo .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
-    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionNames[promotion])
+    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotedTo)
     local backend = result.backend == "local" and "Local" or "Render"
     print("[Stockfish " .. backend .. "] " .. message)
     return true
@@ -721,8 +731,9 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
                     local result, errorMessage = askStockfish(fen)
                     if result then
-                        local fromSquare = result.bestmove:sub(1, 2)
-                        local toSquare = result.bestmove:sub(3, 4)
+                        local bestmove = tostring(result.bestmove):gsub("%s+", "")
+                        local fromSquare = bestmove:sub(1, 2)
+                        local toSquare = bestmove:sub(3, 4)
                         local wantedPiece = "Unknown piece"
                         for token, square in pairs(confirmed) do
                             if square == fromSquare and pieceTypes[token] then
@@ -730,12 +741,12 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                                 break
                             end
                         end
-                        local promotion = result.bestmove:sub(5, 5):lower()
-                        pendingPromotion = promotionNames[promotion] and {from=fromSquare, to=toSquare, kind=promotionNames[promotion]} or nil
-                        local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
+                        local promotedTo = promotionKind(result, bestmove)
+                        pendingPromotion = promotedTo and {from=fromSquare, to=toSquare, kind=promotedTo} or nil
+                        local suffix = promotedTo and " (promote to " .. promotedTo .. ")" or ""
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
-                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionNames[promotion])
+                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotedTo)
                         local backend = result.backend == "local" and "Local" or "Render"
                         print("[Stockfish " .. backend .. "] " .. message)
                     elseif errorMessage then
