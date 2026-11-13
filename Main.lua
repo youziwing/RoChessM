@@ -12,71 +12,14 @@ local STRENGTH = "high"
 local TARGET_ELO = nil
 local PLAY_AS = "White" -- "White", "Black", or "Any"
 local AUTO_DETECT_COLOR = true
+local orientationChanged = false
 local boardCenters = {}
 local arrows = {}
-local promotionLabel = nil
-local lastRequestAt = 0
-local REQUEST_COOLDOWN = 0.35
-local analysisBusy = false
-local analysisRequestId = 0
-local lastCompletedRequestId = 0
-local serviceState = "ready"
-local repetitionCounts = {}
-local positionMoves = {}
-local lastPositionKey = nil
-local repetitionAvoidMoves = {}
-local repetitionAnnounced = {}
-
-local function positionKey(fen)
-    local a, b, c, d = tostring(fen):match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-    return table.concat({a or "", b or "", c or "", d or ""}, " ")
-end
-
-local function prepareRepetition(fen)
-    local key = positionKey(fen)
-    if key ~= lastPositionKey then
-        lastPositionKey = key
-        repetitionCounts[key] = (repetitionCounts[key] or 0) + 1
-    end
-    repetitionAvoidMoves = {}
-    if (repetitionCounts[key] or 0) >= 2 then
-        for move in pairs(positionMoves[key] or {}) do
-            repetitionAvoidMoves[#repetitionAvoidMoves + 1] = move
-        end
-        if not repetitionAnnounced[key] then
-            repetitionAnnounced[key] = true
-            print("[Chess] Repetition detected; looking for an alternative move")
-        end
-    end
-    return key
-end
-
-local function rememberMove(fen, bestmove)
-    local key = positionKey(fen)
-    positionMoves[key] = positionMoves[key] or {}
-    positionMoves[key][bestmove] = true
-end
-
-local function setServiceState(state, detail)
-    if serviceState == state then return end
-    serviceState = state
-    if state == "unavailable" then
-        print("[Stockfish] Unavailable: " .. tostring(detail or "unknown error"))
-    end
-end
 local pendingFen = nil
 local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
 local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
-
-local function promotionKind(result, bestmove)
-    local code = tostring(bestmove or ""):gsub("%s+", ""):sub(5, 5):lower()
-    if result and result.promotion then
-        code = tostring(result.promotion):sub(1, 1):lower()
-    end
-    return promotionNames[code]
-end
 local lastStatusCheck = 0
 local lastAnnouncement = nil
 local castlingRights = "KQkq"
@@ -88,13 +31,9 @@ local function removeArrow()
         arrow.Head:Remove()
     end
     arrows = {}
-    if promotionLabel then
-        pcall(function() promotionLabel:Remove() end)
-        promotionLabel = nil
-    end
 end
 
-local function showArrow(fromSquare, toSquare, color, promotionText)
+local function showArrow(fromSquare, toSquare, color)
     local fromPoint, toPoint = boardCenters[fromSquare], boardCenters[toSquare]
     if not fromPoint or not toPoint or not Drawing then return end
     local dx, dy = toPoint.X - fromPoint.X, toPoint.Y - fromPoint.Y
@@ -117,26 +56,13 @@ local function showArrow(fromSquare, toSquare, color, promotionText)
     arrowHead.Filled = true
     arrowHead.Visible = true
     arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead}
-    if promotionText then
-        local label = Drawing.new("Text")
-        label.Text = "Promote to " .. promotionText
-        label.Size = 14
-        label.Font = Drawing.Fonts.SystemBold
-        label.Color = color
-        label.Outline = true
-        label.Center = true
-        label.ZIndex = 1000
-        label.Position = Vector2.new(toPoint.X, toPoint.Y + 18)
-        label.Visible = true
-        promotionLabel = label
-    end
 end
 
 if UI and UI.AddTab then
     UI.AddTab("RoChess AI", function(tab)
         local settings = tab:Section("Game Settings", "Left")
         settings:Combo("chess_play_as", "Play as", {"White", "Black", "Any"}, 0, function(_, text)
-            PLAY_AS = text
+            applyPlayAs(text)
         end)
         settings:Combo("chess_strength", "Strength", {"Low", "Medium", "High"}, 2, function(_, text)
             STRENGTH = string.lower(text)
@@ -284,6 +210,20 @@ local function inferMissingPiece(snapshot, types)
     end
 end
 
+local function isStartingPosition(snapshot)
+    local types, count = {}, 0
+    for token, square in pairs(snapshot) do
+        types[token] = pieceAtStart(square)
+        if types[token] then count = count + 1 end
+    end
+    if count ~= 32 then return false, types end
+    inferMissingPiece(snapshot, types)
+    for token in pairs(snapshot) do
+        if not types[token] then return false, types end
+    end
+    return true, types
+end
+
 local function pieceCode(pieceType)
     local color, kind = pieceType:match("^(%a+) (.+)$")
     local codes = {Pawn="p", Knight="n", Bishop="b", Rook="r", Queen="q", King="k"}
@@ -320,6 +260,21 @@ local function detectPlayAs()
     if rankText == "8" and fileText == "a" then return "White" end
     if rankText == "1" and fileText == "h" then return "Black" end
     return nil
+end
+
+local function applyPlayAs(color)
+    if color ~= "White" and color ~= "Black" and color ~= "Any" then return end
+    local oldColor = PLAY_AS
+    PLAY_AS = color
+    -- The RoChess square objects already move with the board orientation.
+    -- Do not reverse their chess coordinates a second time.
+    FLIP_BOARD = false
+    if oldColor ~= PLAY_AS then
+        orientationChanged = true
+        newGameRequested = true
+        boardCenters = {}
+        removeArrow()
+    end
 end
 
 local function getToken(piece)
@@ -445,10 +400,6 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
 local function askStockfish(fen, avoidMoves)
-    if tick() - lastRequestAt < REQUEST_COOLDOWN then
-        return nil, "Analysis request throttled"
-    end
-    lastRequestAt = tick()
     local request = {fen=fen, strength=STRENGTH}
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
@@ -534,32 +485,62 @@ local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
-local lastAnalyzedFen = nil
 local initialAnalysisEarliest = tick() + 0.75
+local stockfishOnline = true
+local previousWasStartingPosition = false
+do
+    local atStart, startTypes = isStartingPosition(previous)
+    previousWasStartingPosition = atStart
+end
+
+local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
+    pieceTypes = detectedTypes or {}
+    if not detectedTypes then
+        for token, square in pairs(snapshot) do pieceTypes[token] = pieceAtStart(square) end
+        inferMissingPiece(snapshot, pieceTypes)
+    end
+    previous = snapshot
+    whiteToMove = (PLAY_AS == "Black" and not atStartingPosition) and false or true
+    halfmove, fullmove = 0, 1
+    castlingRights, enPassantTarget = "KQkq", "-"
+    awaitingImport = false
+    initialAnalysisPending = true
+    initialAnalysisEarliest = tick() + 0.75
+    analysisRetryAt = tick()
+    pendingFen = nil
+    pendingPromotion = nil
+    removeArrow()
+end
+
+local function updateStockfishStatus(online, detail)
+    if online == stockfishOnline then
+        return
+    end
+    stockfishOnline = online
+    if online then
+        print("[Stockfish] service is back online")
+        pcall(function() notify("Stockfish", "Service is back online", 5) end)
+    else
+        local message = "Script is currently down: Stockfish service unavailable"
+        if detail and tostring(detail) ~= "" then
+            message = message .. " (" .. tostring(detail) .. ")"
+        end
+        print("[Stockfish] " .. message)
+        pcall(function() notify("Stockfish", message, 8) end)
+    end
+end
 
 local function recommend(snapshot)
-    if analysisBusy then return false end
-    analysisBusy = true
-    analysisRequestId = analysisRequestId + 1
-    local requestId = analysisRequestId
-    setServiceState("analyzing")
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
-    prepareRepetition(fen)
-    local result, errorMessage = askStockfish(fen, repetitionAvoidMoves)
-    analysisBusy = false
-    lastCompletedRequestId = requestId
+    local result, errorMessage = askStockfish(fen)
     if not result or not result.bestmove then
-        setServiceState("retrying", errorMessage)
-        print("[Stockfish] unavailable: " .. tostring(errorMessage or "No best move returned"))
+        updateStockfishStatus(false, errorMessage)
+        print("[Chess Detect] Script is currently down: Stockfish unavailable - " .. tostring(errorMessage or "No best move returned"))
         analysisRetryAt = tick() + 2
         return false
     end
-    setServiceState("ready")
-    analysisRetryAt = 0
-    lastAnalyzedFen = fen
-    local bestmove = tostring(result.bestmove):gsub("%s+", "")
-    rememberMove(fen, bestmove)
-    local fromSquare, toSquare = bestmove:sub(1, 2), bestmove:sub(3, 4)
+    updateStockfishStatus(true)
+    local fromSquare, toSquare = result.bestmove:sub(1, 2), result.bestmove:sub(3, 4)
     local wantedPiece = "Unknown piece"
     for token, square in pairs(snapshot) do
         if square == fromSquare and pieceTypes[token] then
@@ -567,15 +548,15 @@ local function recommend(snapshot)
             break
         end
     end
-    local promotedTo = promotionKind(result, bestmove)
+    local promotion = result.bestmove:sub(5, 5):lower()
     pendingPromotion = nil
-    if promotedTo then
-        pendingPromotion = {from=fromSquare, to=toSquare, kind=promotedTo}
+    if promotionNames[promotion] then
+        pendingPromotion = {from=fromSquare, to=toSquare, kind=promotionNames[promotion]}
     end
-    local suffix = promotedTo and " (promote to " .. promotedTo .. ")" or ""
+    local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
-    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotedTo)
+    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
     local backend = result.backend == "local" and "Local" or "Render"
     print("[Stockfish " .. backend .. "] " .. message)
     return true
@@ -586,36 +567,30 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     if AUTO_DETECT_COLOR then
         local detected = detectPlayAs()
         if detected and detected ~= PLAY_AS then
-            PLAY_AS = detected
+            applyPlayAs(detected)
             print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
-            -- Re-arm the first analysis when color detection finishes late.
-            -- This is important for Black: the initial position belongs to
-            -- White, but the first changed position may already be Black's.
-            initialAnalysisPending = true
-            analysisRetryAt = tick()
-            if PLAY_AS == "Black" and previous and pieceTypes then
-                local atStart = true
-                for token, square in pairs(previous) do
-                    if pieceTypes[token] ~= pieceAtStart(square) then
-                        atStart = false
-                        break
-                    end
-                end
-                if not atStart then whiteToMove = false end
-            end
         end
     elseif UI and UI.GetValue then
         local selected = UI.GetValue("chess_play_as")
         if selected == 0 then
-            PLAY_AS = "White"
+            applyPlayAs("White")
         elseif selected == 1 then
-            PLAY_AS = "Black"
+            applyPlayAs("Black")
         elseif selected == 2 then
-            PLAY_AS = "Any"
+            applyPlayAs("Any")
         end
     end
     wait(SCAN_DELAY)
     local success, current = pcall(scan)
+    if success then
+        local atStartingPosition, detectedTypes = isStartingPosition(current)
+        if atStartingPosition and not previousWasStartingPosition and not newGameRequested then
+            resetForNewGame(current, true, detectedTypes)
+            previousWasStartingPosition = true
+            continue
+        end
+        previousWasStartingPosition = atStartingPosition
+    end
     if newGameRequested and success then
         pieceTypes = {}
         local atStartingPosition = true
@@ -640,11 +615,10 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         awaitingImport = false
         initialAnalysisPending = true
         pendingFen = nil
-        repetitionCounts, positionMoves, repetitionAnnounced = {}, {}, {}
-        lastPositionKey, repetitionAvoidMoves = nil, {}
         importStatus = "New game ready"
         removeArrow()
         newGameRequested = false
+        previousWasStartingPosition = atStartingPosition
         continue
     end
     if pendingFen and success then
@@ -668,8 +642,6 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             importStatus = "Invalid FEN"
         end
         pendingFen = nil
-        repetitionCounts, positionMoves, repetitionAnnounced = {}, {}, {}
-        lastPositionKey, repetitionAvoidMoves = nil, {}
         continue
     end
     if awaitingImport and success then
@@ -713,15 +685,6 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             end
         else
             initialAnalysisPending = false
-        end
-    end
-    if not initialAnalysisPending and analysisRetryAt > 0 and tick() >= analysisRetryAt
-        and success and sameSnapshot(previous, current) then
-        local shouldRetry = PLAY_AS == "Any"
-            or (PLAY_AS == "White" and whiteToMove)
-            or (PLAY_AS == "Black" and not whiteToMove)
-        if shouldRetry and recommend(previous) then
-            analysisRetryAt = 0
         end
     end
     if success and not sameSnapshot(previous, current) then
@@ -773,10 +736,6 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 end
             end
             if #moved > 0 then
-                local multiPly = #moved >= 2 and PLAY_AS ~= "Any"
-                if multiPly then
-                    print("[Chess] Opponent premove detected; processing both board changes")
-                end
                 local move = moved[1]
                 if #moved > 1 then
                     for _, candidate in ipairs(moved) do
@@ -796,22 +755,13 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     end
                 end
                 updateMoveState(move, removed)
-                if multiPly then
-                    -- Two plies were observed in one stable scan. Restore the
-                    -- side-to-move from the player's selected color instead
-                    -- of treating the pair as one move.
-                    whiteToMove = PLAY_AS == "White"
-                else
-                    whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
-                end
+                whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
                 if wasPawn or capture then
                     halfmove = 0
                 else
                     halfmove = halfmove + 1
                 end
-                if multiPly then
-                    fullmove = fullmove + 1
-                elseif whiteToMove then
+                if whiteToMove then
                     fullmove = fullmove + 1
                 end
                 local yourTurn = PLAY_AS == "Any"
@@ -819,24 +769,11 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     or (PLAY_AS == "Black" and not whiteToMove)
                 if yourTurn then
                     local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
-                    local result, errorMessage
-                    if not analysisBusy then
-                        analysisBusy = true
-                        analysisRequestId = analysisRequestId + 1
-                        local requestId = analysisRequestId
-                        setServiceState("analyzing")
-                        prepareRepetition(fen)
-                        result, errorMessage = askStockfish(fen, repetitionAvoidMoves)
-                        analysisBusy = false
-                        lastCompletedRequestId = requestId
-                    else
-                        errorMessage = "Analysis already in progress"
-                    end
+                    local result, errorMessage = askStockfish(fen)
                     if result then
-                        setServiceState("ready")
-                        local bestmove = tostring(result.bestmove):gsub("%s+", "")
-                        local fromSquare = bestmove:sub(1, 2)
-                        local toSquare = bestmove:sub(3, 4)
+                        updateStockfishStatus(true)
+                        local fromSquare = result.bestmove:sub(1, 2)
+                        local toSquare = result.bestmove:sub(3, 4)
                         local wantedPiece = "Unknown piece"
                         for token, square in pairs(confirmed) do
                             if square == fromSquare and pieceTypes[token] then
@@ -844,23 +781,22 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                                 break
                             end
                         end
-                        local promotedTo = promotionKind(result, bestmove)
-                        rememberMove(fen, bestmove)
-                        pendingPromotion = promotedTo and {from=fromSquare, to=toSquare, kind=promotedTo} or nil
-                        local suffix = promotedTo and " (promote to " .. promotedTo .. ")" or ""
+                        local promotion = result.bestmove:sub(5, 5):lower()
+                        local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
-                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotedTo)
+                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
                         local backend = result.backend == "local" and "Local" or "Render"
                         print("[Stockfish " .. backend .. "] " .. message)
                     elseif errorMessage then
-                        setServiceState("retrying", errorMessage)
-                        print("[Stockfish] unavailable: " .. tostring(errorMessage))
-                        analysisRetryAt = tick() + 2
+                        updateStockfishStatus(false, errorMessage)
+                        print("[Chess Detect] Script is currently down: Stockfish unavailable - " .. tostring(errorMessage))
                     end
                 end
             end
             previous = confirmed
+            previousWasStartingPosition = false
         end
     end
 end
+
