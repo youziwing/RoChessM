@@ -9,7 +9,21 @@ local STATUS_INTERVAL = 10
 local API_KEY = ""
 local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
+local SECOND_MOVE_ENABLED = true
 local TARGET_ELO = nil
+local OPENING_NAME = "Automatic"
+local openingActive = false
+local moveHistory = {}
+local openingRefreshRequested = false
+local openingLines = {
+    ["Italian Game"] = {"e2e4", "e7e5", "g1f3", "b8c6", "f1c4"},
+    ["Sicilian Defense"] = {"e2e4", "c7c5", "g1f3", "d7d6"},
+    ["French Defense"] = {"e2e4", "e7e6", "d2d4", "d7d5"},
+    ["Caro-Kann Defense"] = {"e2e4", "c7c6", "d2d4", "d7d5"},
+    ["Queen's Gambit"] = {"d2d4", "d7d5", "c2c4"},
+    ["King's Indian Defense"] = {"d2d4", "g8f6", "c2c4", "g7g6"},
+    ["English Opening"] = {"c2c4", "e7e5", "b1c3", "g8f6"},
+}
 local PLAY_AS = "White" -- "White", "Black", or "Any"
 local AUTO_DETECT_COLOR = true
 local orientationChanged = false
@@ -66,6 +80,18 @@ if UI and UI.AddTab then
         end)
         settings:Combo("chess_strength", "Strength", {"Low", "Medium", "High"}, 2, function(_, text)
             STRENGTH = string.lower(text)
+        end)
+        settings:Combo("chess_second_move", "Second best move", {"Off", "On"}, 1, function(_, text)
+            SECOND_MOVE_ENABLED = text == "On"
+        end)
+        settings:Combo("chess_opening", "Opening", {"Automatic", "Italian Game", "Sicilian Defense", "French Defense", "Caro-Kann Defense", "Queen's Gambit", "King's Indian Defense", "English Opening"}, 0, function(_, text)
+            OPENING_NAME = text
+            openingActive = OPENING_NAME ~= "Automatic"
+            moveHistory = {}
+            openingRefreshRequested = true
+            newGameRequested = true
+            removeArrow()
+            print("[Chess] Opening selected: " .. OPENING_NAME)
         end)
         local eloInput = settings:InputText("chess_target_elo", "Target Elo (800-3000, optional)", "", function() end)
         settings:Button("Apply Target Elo", function()
@@ -401,6 +427,7 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
 end
 local function askStockfish(fen, avoidMoves)
     local request = {fen=fen, strength=STRENGTH}
+    if SECOND_MOVE_ENABLED then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
     local body = HttpService:JSONEncode(request)
@@ -414,6 +441,35 @@ local function askStockfish(fen, avoidMoves)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
+end
+
+local function openingMove(snapshot)
+    if not openingActive or OPENING_NAME == "Automatic" then return nil end
+    local line = openingLines[OPENING_NAME]
+    local expected = line and line[#moveHistory + 1]
+    if not expected then return nil end
+    local fromSquare, toSquare = expected:sub(1, 2), expected:sub(3, 4)
+    local hasSource = false
+    for _, square in pairs(snapshot) do
+        if square == fromSquare then hasSource = true break end
+    end
+    if not hasSource then
+        openingActive = false
+        print("[Chess] Opening line ended: move is not legal in the current position")
+        return nil
+    end
+    return expected
+end
+
+local function bestMove(fen, snapshot, avoidMoves)
+    if openingActive and OPENING_NAME ~= "Automatic" then
+        local line = openingLines[OPENING_NAME]
+        local forced = line and line[#moveHistory + 1]
+        if forced then
+            return {bestmove=forced, backend="opening"}
+        end
+    end
+    return askStockfish(fen, avoidMoves)
 end
 
 local function checkAnnouncement()
@@ -532,7 +588,7 @@ end
 
 local function recommend(snapshot)
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
-    local result, errorMessage = askStockfish(fen)
+    local result, errorMessage = bestMove(fen, snapshot)
     if not result or not result.bestmove then
         updateStockfishStatus(false, errorMessage)
         print("[Chess Detect] Script is currently down: Stockfish unavailable - " .. tostring(errorMessage or "No best move returned"))
@@ -557,7 +613,10 @@ local function recommend(snapshot)
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
     showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
-    local backend = result.backend == "local" and "Local" or "Render"
+    if SECOND_MOVE_ENABLED and result.alternative then
+        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255))
+    end
+    local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
     print("[Stockfish " .. backend .. "] " .. message)
     return true
 end
@@ -582,6 +641,19 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     end
     wait(SCAN_DELAY)
     local success, current = pcall(scan)
+    if openingRefreshRequested and success then
+        local atStart, detectedTypes = isStartingPosition(current)
+        if atStart then
+            resetForNewGame(current, true, detectedTypes)
+            initialAnalysisPending = true
+            analysisRetryAt = tick()
+        else
+            openingActive = false
+        end
+        openingRefreshRequested = false
+        newGameRequested = false
+        continue
+    end
     if success then
         local atStartingPosition, detectedTypes = isStartingPosition(current)
         if atStartingPosition and not previousWasStartingPosition and not newGameRequested then
@@ -592,6 +664,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         previousWasStartingPosition = atStartingPosition
     end
     if newGameRequested and success then
+        moveHistory = {}
+        openingActive = OPENING_NAME ~= "Automatic"
         pieceTypes = {}
         local atStartingPosition = true
         for token, square in pairs(current) do
@@ -615,6 +689,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         awaitingImport = false
         initialAnalysisPending = true
         pendingFen = nil
+            moveHistory = {}
+            openingActive = false
         importStatus = "New game ready"
         removeArrow()
         newGameRequested = false
@@ -755,6 +831,17 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     end
                 end
                 updateMoveState(move, removed)
+                local playedUci = move.from .. move.to
+                if openingActive and OPENING_NAME ~= "Automatic" then
+                    local line = openingLines[OPENING_NAME]
+                    local expected = line and line[#moveHistory + 1]
+                    if expected ~= playedUci then
+                        openingActive = false
+                        print("[Chess] Opening line ended: opponent deviated")
+                    else
+                        moveHistory[#moveHistory + 1] = playedUci
+                    end
+                end
                 whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
                 if wasPawn or capture then
                     halfmove = 0
@@ -769,7 +856,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     or (PLAY_AS == "Black" and not whiteToMove)
                 if yourTurn then
                     local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
-                    local result, errorMessage = askStockfish(fen)
+                    local result, errorMessage = bestMove(fen, confirmed)
                     if result then
                         updateStockfishStatus(true)
                         local fromSquare = result.bestmove:sub(1, 2)
@@ -786,7 +873,10 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
                         showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
-                        local backend = result.backend == "local" and "Local" or "Render"
+                        if SECOND_MOVE_ENABLED and result.alternative then
+                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255))
+                        end
+                        local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
                         print("[Stockfish " .. backend .. "] " .. message)
                     elseif errorMessage then
                         updateStockfishStatus(false, errorMessage)
