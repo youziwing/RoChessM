@@ -20,6 +20,7 @@ local openingLines = {
     ["Sicilian Defense"] = {"e2e4", "c7c5", "g1f3", "d7d6"},
     ["French Defense"] = {"e2e4", "e7e6", "d2d4", "d7d5"},
     ["Caro-Kann Defense"] = {"e2e4", "c7c6", "d2d4", "d7d5"},
+    ["Alien Gambit"] = {"e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4", "c3e4", "g8f6", "e4g5", "h7h6", "g5f7", "e8f7", "g1f3"},
     ["Queen's Gambit"] = {"d2d4", "d7d5", "c2c4"},
     ["King's Indian Defense"] = {"d2d4", "g8f6", "c2c4", "g7g6"},
     ["English Opening"] = {"c2c4", "e7e5", "b1c3", "g8f6"},
@@ -28,6 +29,7 @@ local PLAY_AS = "White" -- "White", "Black", or "Any"
 local AUTO_DETECT_COLOR = true
 local orientationChanged = false
 local boardCenters = {}
+local boardSquareObjects = {}
 local arrows = {}
 local pendingFen = nil
 local enteredFen = ""
@@ -48,7 +50,19 @@ local function removeArrow()
 end
 
 local function showArrow(fromSquare, toSquare, color)
-    local fromPoint, toPoint = boardCenters[fromSquare], boardCenters[toSquare]
+    local function liveCenter(name)
+        local square = boardSquareObjects[name]
+        if square then
+            local ok, position, size = pcall(function()
+                return square.AbsolutePosition, square.AbsoluteSize
+            end)
+            if ok and position and size and size.X >= 2 and size.Y >= 2 then
+                return Vector2.new(position.X + size.X / 2, position.Y + size.Y / 2)
+            end
+        end
+        return boardCenters[name]
+    end
+    local fromPoint, toPoint = liveCenter(fromSquare), liveCenter(toSquare)
     if not fromPoint or not toPoint or not Drawing then return end
     local dx, dy = toPoint.X - fromPoint.X, toPoint.Y - fromPoint.Y
     local length = math.sqrt(dx * dx + dy * dy)
@@ -84,7 +98,7 @@ if UI and UI.AddTab then
         settings:Combo("chess_second_move", "Second best move", {"Off", "On"}, 1, function(_, text)
             SECOND_MOVE_ENABLED = text == "On"
         end)
-        settings:Combo("chess_opening", "Opening", {"Automatic", "Italian Game", "Sicilian Defense", "French Defense", "Caro-Kann Defense", "Queen's Gambit", "King's Indian Defense", "English Opening"}, 0, function(_, text)
+        settings:Combo("chess_opening", "Opening", {"Automatic", "Italian Game", "Sicilian Defense", "French Defense", "Caro-Kann Defense", "Alien Gambit", "Queen's Gambit", "King's Indian Defense", "English Opening"}, 0, function(_, text)
             OPENING_NAME = text
             openingActive = OPENING_NAME ~= "Automatic"
             moveHistory = {}
@@ -344,10 +358,12 @@ local function scan()
     end
     assert(spacing < math.huge and spacing >= 4, "Could not calculate board spacing.")
     boardCenters = {}
+    boardSquareObjects = {}
     for _, square in ipairs(squares) do
         local width = square.w >= 4 and square.w or spacing
         local height = square.h >= 4 and square.h or spacing
         boardCenters[squareName(square.index)] = Vector2.new(square.x + width / 2, square.y + height / 2)
+        boardSquareObjects[squareName(square.index)] = squareFolder:FindFirstChild("S" .. tostring(square.index))
     end
     local tokens, occupied = {}, {}
     for _, piece in ipairs(pieceFolder:GetChildren()) do
@@ -814,10 +830,21 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             if #moved > 0 then
                 local move = moved[1]
                 if #moved > 1 then
+                    local expectedColor = whiteToMove and "White" or "Black"
+                    local matchedTurn = false
                     for _, candidate in ipairs(moved) do
-                        if candidate.piece and candidate.piece:sub(7) == "King" then
+                        if candidate.piece and candidate.piece:sub(1, 5) == expectedColor then
                             move = candidate
+                            matchedTurn = true
                             break
+                        end
+                    end
+                    if not matchedTurn then
+                        for _, candidate in ipairs(moved) do
+                            if candidate.piece and candidate.piece:sub(7) == "King" then
+                                move = candidate
+                                break
+                            end
                         end
                     end
                 end
