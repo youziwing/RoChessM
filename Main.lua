@@ -40,6 +40,7 @@ local lastStatusCheck = 0
 local lastAnnouncement = nil
 local castlingRights = "KQkq"
 local enPassantTarget = "-"
+local pieceTypes = {}
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
@@ -441,6 +442,20 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     local rights = castlingRights == "" and "-" or castlingRights
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
+
+local function positionReady(snapshot)
+    local whiteKing, blackKing, typed = 0, 0, 0
+    for token, square in pairs(snapshot) do
+        local piece = pieceTypes[token]
+        if not piece then return false, "unclassified piece" end
+        typed = typed + 1
+        if piece == "White King" then whiteKing = whiteKing + 1 end
+        if piece == "Black King" then blackKing = blackKing + 1 end
+    end
+    if typed < 2 then return false, "too few pieces" end
+    if whiteKing ~= 1 or blackKing ~= 1 then return false, "invalid king count" end
+    return true
+end
 local function askStockfish(fen, avoidMoves)
     local request = {fen=fen, strength=STRENGTH}
     if SECOND_MOVE_ENABLED then request.include_alternative = true end
@@ -509,7 +524,8 @@ end
 
 local ok, previous = pcall(scan)
 if not ok then print("[Chess Detect] Initialization failed: " .. tostring(previous)); return end
-local pieceTypes, known = {}, 0
+pieceTypes = {}
+local known = 0
 local unknownTokens = {}
 local startedAfterOpening = false
 for token, square in pairs(previous) do
@@ -603,6 +619,11 @@ local function updateStockfishStatus(online, detail)
 end
 
 local function recommend(snapshot)
+    local ready, reason = positionReady(snapshot)
+    if not ready then
+        analysisRetryAt = tick() + 0.35
+        return false
+    end
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     local result, errorMessage = bestMove(fen, snapshot)
     if not result or not result.bestmove then
@@ -829,11 +850,26 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             end
             if #moved > 0 then
                 local move = moved[1]
+                local castled = false
                 if #moved > 1 then
                     local expectedColor = whiteToMove and "White" or "Black"
                     local matchedTurn = false
+                    local kingMove, rookMove
                     for _, candidate in ipairs(moved) do
-                        if candidate.piece and candidate.piece:sub(1, 5) == expectedColor then
+                        if candidate.piece and candidate.piece:sub(7) == "King" then kingMove = candidate end
+                        if candidate.piece and candidate.piece:sub(7) == "Rook" then rookMove = candidate end
+                    end
+                    if kingMove and rookMove then
+                        local validCastle = (kingMove.from == "e1" and (kingMove.to == "g1" or kingMove.to == "c1") and kingMove.piece == "White King")
+                            or (kingMove.from == "e8" and (kingMove.to == "g8" or kingMove.to == "c8") and kingMove.piece == "Black King")
+                        if validCastle then
+                            move = kingMove
+                            castled = true
+                            matchedTurn = true
+                        end
+                    end
+                    for _, candidate in ipairs(moved) do
+                        if not matchedTurn and candidate.piece and candidate.piece:sub(1, 5) == expectedColor then
                             move = candidate
                             matchedTurn = true
                             break
@@ -858,6 +894,14 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     end
                 end
                 updateMoveState(move, removed)
+                if castled then
+                    if move.piece == "White King" then
+                        castlingRights = castlingRights:gsub("K", ""):gsub("Q", "")
+                    else
+                        castlingRights = castlingRights:gsub("k", ""):gsub("q", "")
+                    end
+                    if castlingRights == "" then castlingRights = "-" end
+                end
                 local playedUci = move.from .. move.to
                 if openingActive and OPENING_NAME ~= "Automatic" then
                     local line = openingLines[OPENING_NAME]
@@ -882,8 +926,12 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     or (PLAY_AS == "White" and whiteToMove)
                     or (PLAY_AS == "Black" and not whiteToMove)
                 if yourTurn then
-                    local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
-                    local result, errorMessage = bestMove(fen, confirmed)
+                    local ready = positionReady(confirmed)
+                    local result, errorMessage
+                    if ready then
+                        local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
+                        result, errorMessage = bestMove(fen, confirmed)
+                    end
                     if result then
                         updateStockfishStatus(true)
                         local fromSquare = result.bestmove:sub(1, 2)
