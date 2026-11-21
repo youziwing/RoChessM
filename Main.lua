@@ -3,8 +3,8 @@ local FLIP_BOARD = false
 local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
 _G.__ROCHESS_SESSION = ROCHESS_SESSION
 local SCAN_DELAY = 0.15
-local API_URL = "https://rochess-gateway-new.vercel.app/api/analyze"
-local STATUS_URL = "https://rochess-gateway-new.vercel.app/api/health"
+local API_URL = "http://127.0.0.1:17876/analyze"
+local STATUS_URL = "http://127.0.0.1:17876/health"
 local STATUS_INTERVAL = 10
 local API_KEY = ""
 local ANALYSIS_DEPTH = 10
@@ -46,11 +46,12 @@ local function removeArrow()
     for _, arrow in ipairs(arrows) do
         arrow.Line:Remove()
         arrow.Head:Remove()
+        if arrow.Label then arrow.Label:Remove() end
     end
     arrows = {}
 end
 
-local function showArrow(fromSquare, toSquare, color)
+local function showArrow(fromSquare, toSquare, color, labelText)
     local function liveCenter(name)
         local square = boardSquareObjects[name]
         if square then
@@ -84,7 +85,20 @@ local function showArrow(fromSquare, toSquare, color)
     arrowHead.Color = color
     arrowHead.Filled = true
     arrowHead.Visible = true
-    arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead}
+    local label
+    if labelText and labelText ~= "" then
+        label = Drawing.new("Text")
+        label.Text = labelText
+        label.Position = Vector2.new(toPoint.X, toPoint.Y + 22)
+        label.Size = 18
+        label.Center = true
+        label.Outline = true
+        label.Color = Color3.fromRGB(255, 245, 80)
+        pcall(function() label.Font = 2 end)
+        pcall(function() label.ZIndex = 100 end)
+        label.Visible = true
+    end
+    arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead, Label = label}
 end
 
 if UI and UI.AddTab then
@@ -649,9 +663,12 @@ local function recommend(snapshot)
     local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
-    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+    local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
+    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
     if SECOND_MOVE_ENABLED and result.alternative then
-        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255))
+        local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
+        local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
+        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
     end
     local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
     print("[Stockfish " .. backend .. "] " .. message)
@@ -947,9 +964,12 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
-                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80))
+                        local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
+                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
                         if SECOND_MOVE_ENABLED and result.alternative then
-                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255))
+                            local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
+                            local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
+                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
                         end
                         local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
                         print("[Stockfish " .. backend .. "] " .. message)
