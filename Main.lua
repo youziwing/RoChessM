@@ -269,7 +269,6 @@ local function setupInterfaceChoice()
         source = source:gsub('   icon%(tab%.Id%.%."icon".-\n', "")
         source = source:gsub('   label%(tab%.Id%.%."name".-\n', "")
         source = source:gsub('   if over and click then click=false;tab:Select%(%) end\n', "")
-        source = source:gsub('local hs=st%.HeaderSize\n', 'local hs=st.HeaderSize\n  box(id.."header",px,py,width,isl._head,black,0,0,30)\n')
         local loaded = loadstring(source)() or _G.JDUI
         pcall(function() loaded.Effects = false end)
         return loaded
