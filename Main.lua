@@ -1,5 +1,8 @@
 
 local FLIP_BOARD = false
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local HttpService = game:GetService("HttpService")
 local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
 _G.__ROCHESS_SESSION = ROCHESS_SESSION
 local SCAN_DELAY = 0.08
@@ -27,11 +30,13 @@ local openingLines = {
     ["French Defense"] = {"e2e4", "e7e6", "d2d4", "d7d5"},
     ["Caro-Kann Defense"] = {"e2e4", "c7c6", "d2d4", "d7d5"},
     ["Alien Gambit"] = {"e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4", "c3e4", "g8f6", "e4g5", "h7h6", "g5f7", "e8f7", "g1f3"},
-    ["Queen's Gambit"] = {"d2d4", "d7d5", "c2c4"},
+    ["Queen's Gambit"] = {"ad2d4", "d7d5", "c2c4"},
     ["King's Indian Defense"] = {"d2d4", "g8f6", "c2c4", "g7g6"},
     ["English Opening"] = {"c2c4", "e7e5", "b1c3", "g8f6"},
 }
 local PLAY_AS = "White" -- "White" or "Black"
+-- Auto-detect is the startup behavior; the UI intentionally exposes only
+-- White and Black. Changing the combo switches to a manual override.
 local AUTO_DETECT_COLOR = true
 local lastPlayAsSelection = nil
 local boardCenters = {}
@@ -48,6 +53,28 @@ local lastAnnouncement = nil
 local castlingRights = "KQkq"
 local enPassantTarget = "-"
 local pieceTypes = {}
+local CUSTOM_UI_CHOICE_FILE = "rochess_ui_choice.json"
+local useCustomUI = false
+local customUI = nil
+local CALIBRATION_FILE = "rochess_calibration.json"
+local calibrationSignature = nil
+local calibrationSaved = false
+local calibrationOffsetX = 0
+local calibrationOffsetY = 0
+local calibrationSquareScale = 1
+local calibrationActive = true
+local calibrationConfirm = false
+local calibrationPoints = {}
+local calibrationDrawings = {}
+pcall(function()
+    if isfile(CALIBRATION_FILE) then
+        local saved = HttpService:JSONDecode(readfile(CALIBRATION_FILE))
+        calibrationOffsetX = tonumber(saved.offsetX) or 0
+        calibrationOffsetY = tonumber(saved.offsetY) or 0
+        calibrationActive = tonumber(saved.version) ~= 4
+        calibrationSquareScale = tonumber(saved.squareScale) or 1
+    end
+end)
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
@@ -71,7 +98,11 @@ local function showArrow(fromSquare, toSquare, color, labelText)
         end
         return boardCenters[name]
     end
-    local fromPoint, toPoint = liveCenter(fromSquare), liveCenter(toSquare)
+    local function adjusted(point)
+        if not point then return nil end
+        return Vector2.new(point.X + calibrationOffsetX, point.Y + calibrationOffsetY)
+    end
+    local fromPoint, toPoint = adjusted(liveCenter(fromSquare)), adjusted(liveCenter(toSquare))
     if not fromPoint or not toPoint or not Drawing then return end
     local dx, dy = toPoint.X - fromPoint.X, toPoint.Y - fromPoint.Y
     local length = math.sqrt(dx * dx + dy * dy)
@@ -108,7 +139,307 @@ local function showArrow(fromSquare, toSquare, color, labelText)
     arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead, Label = label}
 end
 
-if UI and UI.AddTab then
+local function saveCalibration(signature)
+    if calibrationSaved and calibrationSignature == signature then return end
+    calibrationSignature = signature
+    calibrationSaved = true
+    pcall(function()
+        writefile(CALIBRATION_FILE, HttpService:JSONEncode({
+            signature=signature,
+            version=4,
+            offsetX=calibrationOffsetX,
+            offsetY=calibrationOffsetY,
+            squareScale=calibrationSquareScale,
+        }))
+    end)
+    pcall(function()
+        notify("RoChess", "Board alignment calibrated", 3)
+    end)
+end
+
+local function clearCalibrationDrawings()
+    for _, drawing in ipairs(calibrationDrawings) do pcall(function() drawing:Remove() end) end
+    calibrationDrawings = {}
+end
+
+local function beginVisualCalibration()
+    calibrationActive = true
+    calibrationConfirm = false
+    calibrationPoints = {}
+    clearCalibrationDrawings()
+    removeArrow()
+    print("[Chess Detect] Drag the four calibration endpoints, then press Save visual calibration")
+end
+
+local function updateVisualCalibration()
+    if not calibrationActive then return end
+    local function center(square)
+        local p = boardCenters[square]
+        return p and Vector2.new(p.X + calibrationOffsetX, p.Y + calibrationOffsetY)
+    end
+    local definitions = {
+        {from="e2", to="e4", color=Color3.fromRGB(40,220,80)},
+        {from="g1", to="f3", color=Color3.fromRGB(70,140,255)},
+    }
+    for i, d in ipairs(definitions) do
+        calibrationPoints[i] = calibrationPoints[i] or {from=center(d.from), to=center(d.to), held=nil}
+        local point = calibrationPoints[i]
+        local mouse = player:GetMouse()
+        local mx, my = tonumber(mouse and mouse.X), tonumber(mouse and mouse.Y)
+        if mx and my and ismouse1pressed() then
+            if not point.held then
+                local function near(p) return p and math.abs(p.X-mx) < 28 and math.abs(p.Y-my) < 28 end
+                if near(point.from) then point.held = "from" elseif near(point.to) then point.held = "to" end
+            end
+            if point.held == "from" then point.from = Vector2.new(mx,my) end
+            if point.held == "to" then point.to = Vector2.new(mx,my) end
+        else
+            point.held = nil
+        end
+        local line = calibrationDrawings[(i-1)*3+1]
+        local head = calibrationDrawings[(i-1)*3+2]
+        local text = calibrationDrawings[(i-1)*3+3]
+        if not line then
+            line, head, text = Drawing.new("Line"), Drawing.new("Triangle"), Drawing.new("Text")
+            calibrationDrawings[(i-1)*3+1], calibrationDrawings[(i-1)*3+2], calibrationDrawings[(i-1)*3+3] = line, head, text
+        end
+        local dx, dy = point.to.X-point.from.X, point.to.Y-point.from.Y
+        local length = math.max(1, math.sqrt(dx*dx+dy*dy)); local ux, uy = dx/length, dy/length; local px, py = -uy, ux
+        line.From, line.To, line.Color, line.Thickness, line.Visible = point.from, Vector2.new(point.to.X-ux*8,point.to.Y-uy*8), d.color, 4, true
+        head.PointA, head.PointB, head.PointC, head.Color, head.Filled, head.Visible = point.to, Vector2.new(point.to.X-ux*18+px*9,point.to.Y-uy*18+py*9), Vector2.new(point.to.X-ux*18-px*9,point.to.Y-uy*18-py*9), d.color, true, true
+        text.Text, text.Position, text.Size, text.Center, text.Outline, text.Visible = i == 1 and "DRAG TO E2-E4" or "DRAG TO G1-F3", Vector2.new(point.to.X,point.to.Y+22), 16, true, true, true
+    end
+    if calibrationConfirm then
+        local dx, dy, count = 0, 0, 0
+        for i, d in ipairs(definitions) do
+            local baseFrom, baseTo = boardCenters[d.from], boardCenters[d.to]
+            local point = calibrationPoints[i]
+            if baseFrom and baseTo and point then
+                dx = dx + ((point.from.X-baseFrom.X)+(point.to.X-baseTo.X))/2
+                dy = dy + ((point.from.Y-baseFrom.Y)+(point.to.Y-baseTo.Y))/2
+                count = count + 1
+            end
+        end
+        if count > 0 then calibrationOffsetX, calibrationOffsetY = dx/count, dy/count end
+        calibrationSaved, calibrationSignature, calibrationConfirm = false, nil, false
+        saveCalibration("manual")
+        calibrationActive = false
+        clearCalibrationDrawings()
+        print(string.format("[Chess Detect] Visual calibration saved: X=%.1f Y=%.1f", calibrationOffsetX, calibrationOffsetY))
+    end
+end
+
+local RoChessUI
+local function setupInterfaceChoice()
+    local savedChoice
+    pcall(function()
+        if isfile(CUSTOM_UI_CHOICE_FILE) then
+            local saved = HttpService:JSONDecode(readfile(CUSTOM_UI_CHOICE_FILE))
+            savedChoice = saved and saved.choice
+        end
+    end)
+    if savedChoice == "matcha" then
+        useCustomUI = false
+        return false
+    end
+    local ok, jdui = pcall(function()
+        local source = httpget("https://raw.githubusercontent.com/jdev-studio/jdui/refs/heads/main/JDUI")
+        -- JDUI's stock sidebar always renders a player avatar. Remove only that
+        -- profile block and frame rules; the rest of the library remains unchanged.
+        source = source:gsub("if not avatar%(%s*26%.5%s*,%s*26%.5%s*,%s*32%s*%) then.-end", "if false then end")
+        source = source:gsub('box%("brandBadge".-\n', "")
+        source = source:gsub('box%("sidebarRule".-\n', "")
+        source = source:gsub('box%("sidebar".-\n', "")
+        source = source:gsub('box%("rim".-\n', "")
+        source = source:gsub('label%("playerInitial".-\n', "")
+        source = source:gsub('label%("playerName".-\n', "")
+        source = source:gsub('label%("playerUsername".-\n', "")
+        -- Keep the single RoChess page but remove JDUI's navigation rail.
+        source = source:gsub('   box%("sidebar".-label%("keyhint".-\n', "")
+        source = source:gsub('contentLeft=99', 'contentLeft=20')
+        source = source:gsub('contentLeft=20%+108%*sidebarOpen', 'contentLeft=20')
+        -- Skip JDUI's animated loading/title sequence.
+        source = source:gsub('local introStart,introDone,introChimed,introSound=nil,false,false,nil', 'local introStart,introDone,introChimed,introSound=nil,true,true,nil')
+        -- Prevent the hidden sidebar from expanding when the mouse crosses it.
+        source = source:gsub('local expand=sidebarOver or %(sidebarOpen>%.01 and now%-sidebarLeaveTime<%.12%)', 'local expand=false')
+        source = source:gsub('smallButton%("close".-requestClose%)', "")
+        source = source:gsub('for i=1,math%.min%(%s*5,%s*#app%.Tabs%-tabOffset%) do.-   if #app%.Tabs>5 then', 'if #app.Tabs>5 then')
+        source = source:gsub('   box%(tab%.Id%.%."nav".-\n', "")
+        source = source:gsub('   box%(tab%.Id%.%."rail".-\n', "")
+        source = source:gsub('   icon%(tab%.Id%.%."icon".-\n', "")
+        source = source:gsub('   label%(tab%.Id%.%."name".-\n', "")
+        source = source:gsub('   if over and click then click=false;tab:Select%(%) end\n', "")
+        source = source:gsub('local hs=st%.HeaderSize\n', 'local hs=st.HeaderSize\n  box(id.."header",px,py,width,isl._head,black,0,0,30)\n')
+        local loaded = loadstring(source)() or _G.JDUI
+        pcall(function() loaded.Effects = false end)
+        return loaded
+    end)
+    if not ok or type(jdui) ~= "table" then
+        print("[RoChess UI] JDUI failed to load; using Matcha UI")
+        return false
+    end
+    useCustomUI = true
+    local main = jdui:AddTab({Title="RoChess", Icon="bolt"})
+    local engine = main:AddIsland({Title="Engine", Description="Choose the analysis backend"})
+    engine:AddDropdown({Title="Engine", Options={"Stockfish","Maia (Human Like)"}, Default=ENGINE=="maia" and "Maia (Human Like)" or "Stockfish", Callback=function(value)
+        ENGINE = value == "Maia (Human Like)" and "maia" or "stockfish"
+    end})
+    engine:AddDropdown({Title="Strength", Options={"Low","Medium","High"}, Default=STRENGTH:gsub("^%l",string.upper), Callback=function(value) STRENGTH=string.lower(value) end})
+    engine:AddTextbox({Title="Target Elo", Placeholder="800-3000 or blank", Default=TARGET_ELO and tostring(TARGET_ELO) or "", Callback=function(value)
+        local number=tonumber(value); TARGET_ELO=number and math.max(800,math.min(3000,math.floor(number+0.5))) or nil
+    end})
+    local gameTab = main
+    local game = gameTab:AddIsland({Title="Game settings", Description="Position and move preferences"})
+    game:AddDropdown({Title="Play as", Options={"White","Black"}, Default=PLAY_AS, Callback=function(value) applyPlayAs(value) end})
+    game:AddDropdown({Title="Playing style", Options={"Standard","Aggressive","Defensive"}, Default=PLAY_STYLE:gsub("^%l",string.upper), Callback=function(value) PLAY_STYLE=string.lower(value) end})
+    game:AddDropdown({Title="Opening", Options={"Automatic","Italian Game","Sicilian Defense","French Defense","Caro-Kann Defense","Alien Gambit","Queen's Gambit","King's Indian Defense","English Opening"}, Default=OPENING_NAME, Callback=function(value)
+        OPENING_NAME=value; openingActive=value~="Automatic"; moveHistory={}; openingRefreshRequested=true; newGameRequested=true; removeArrow()
+    end})
+    game:AddToggle({Title="Second best move", Default=SECOND_MOVE_ENABLED, Callback=function(value) SECOND_MOVE_ENABLED=value end})
+    local actions = gameTab:AddIsland({Title="Actions", Description="Game and position controls"})
+    actions:AddButton({Title="New Game", ButtonText="Reset", Callback=function() newGameRequested=true end})
+    actions:AddButton({Title="Visual Calibration", ButtonText="Open", Callback=function() beginVisualCalibration() end})
+    actions:AddButton({Title="Use Matcha UI next launch", ButtonText="Switch", Callback=function()
+        pcall(function() writefile(CUSTOM_UI_CHOICE_FILE, HttpService:JSONEncode({choice="matcha"})) end)
+        pcall(function() jdui:Notify({Title="Saved", Content="Matcha UI will open next launch.", Type="success", Duration=4}) end)
+    end})
+    local position = gameTab:AddIsland({Title="Position Import", Description="Load a FEN position"})
+    position:AddTextbox({Title="FEN", Placeholder="Paste a FEN position", Default="", Callback=function(value) enteredFen=value or "" end})
+    position:AddButton({Title="Import position", ButtonText="Import", Callback=function() pendingFen=enteredFen; newGameRequested=true end})
+    jdui.Tabs = {main}
+    pcall(function() jdui:SetConfig("rochess") end)
+    pcall(function() jdui:SetKeybind(0xA1) end)
+    pcall(function() jdui:SetTheme("Black") end)
+    pcall(function() jdui:SetLayout("Compact") end)
+    pcall(function() jdui:SetLayout({Height=28, Gap=4, Padding=6, IslandPadding=7, IslandBorder=0, IslandOpacity=0.58, IslandCorner=6, RowHeight=22, RowGap=2, BoxHeight=24, ButtonHeight=24}) end)
+    pcall(function() jdui:SetOverflow("Scroll") end)
+    pcall(function() jdui:SetOpacity(1) end)
+    pcall(function() jdui:SetTitle("RoChess") end)
+    pcall(function() jdui:SetSubtitle("Stockfish / Maia") end)
+    pcall(function() jdui:SetEffects(false) end)
+    main:Select()
+    return true
+end
+
+RoChessUI = {}
+do
+    local WHITE = Color3.fromRGB(235,240,248)
+    local MUTED = Color3.fromRGB(155,166,184)
+    local PANEL = Color3.fromRGB(25,30,40)
+    local CARD = Color3.fromRGB(35,42,55)
+    local function add(list, kind, props)
+        local object = Drawing.new(kind)
+        for key, value in pairs(props) do pcall(function() object[key] = value end) end
+        list[#list+1] = object
+        return object
+    end
+    local function inside(mouse,x,y,w,h)
+        return mouse and mouse.X >= x and mouse.X <= x+w and mouse.Y >= y and mouse.Y <= y+h
+    end
+    function RoChessUI.new(callbacks)
+        local ui = {callbacks=callbacks or {}, objects={}, controls={}, popup=true, visible=true, pressed=false, selected=nil, dragging=false, dragX=0, dragY=0, rightShift=false, x=32, y=80, w=330}
+        local function text(value,x,y,size,color)
+            return add(ui.objects,"Text",{Text=value,Position=Vector2.new(x,y),Size=size or 14,Color=color or WHITE,Outline=true,Visible=true,ZIndex=200})
+        end
+        local function button(id,label,x,y,w,h)
+            local box=add(ui.objects,"Square",{Position=Vector2.new(x,y),Size=Vector2.new(w,h),Color=CARD,Filled=true,Rounding=8,Visible=true,ZIndex=199})
+            text(label,x+14,y+8,13,WHITE)
+            ui.controls[#ui.controls+1]={id=id,x=x,y=y,w=w,h=h}
+        end
+        local function popup()
+            add(ui.objects,"Square",{Position=Vector2.new(0,0),Size=Vector2.new(1920,1080),Color=Color3.fromRGB(8,11,17),Transparency=.35,Filled=true,Visible=true,ZIndex=190})
+            add(ui.objects,"Square",{Position=Vector2.new(530,315),Size=Vector2.new(420,250),Color=PANEL,Filled=true,Visible=true,ZIndex=191})
+            text("RoChess interface",570,350,22,WHITE); text("Choose which interface to use",570,385,14,MUTED)
+            button("custom","Use RoChess UI",570,430,160,48); button("matcha","Use Matcha UI",750,430,160,48)
+        end
+        local function panel()
+            ui.w=620
+            add(ui.objects,"Square",{Position=Vector2.new(ui.x,ui.y),Size=Vector2.new(ui.w,520),Color=PANEL,Filled=true,Rounding=14,Visible=true,ZIndex=190})
+            add(ui.objects,"Square",{Position=Vector2.new(ui.x,ui.y),Size=Vector2.new(64,520),Color=Color3.fromRGB(18,22,31),Filled=true,Rounding=14,Visible=true,ZIndex=191})
+            text("R",ui.x+23,ui.y+24,22,WHITE)
+            text("A",ui.x+24,ui.y+88,19,Color3.fromRGB(150,120,255))
+            text("S",ui.x+24,ui.y+150,19,MUTED)
+            text("M",ui.x+23,ui.y+212,19,MUTED)
+            text("RoChess",ui.x+92,ui.y+24,24,WHITE)
+            text("Chess assistant",ui.x+92,ui.y+56,13,MUTED)
+            text("RIGHTSHIFT  •  HIDE / SHOW",ui.x+430,ui.y+31,10,MUTED)
+            local function heading(value,x,y)
+                text(value,x,y,11,Color3.fromRGB(170,155,255))
+            end
+            local function row(id,label,value,x,y,w)
+                text(label,x,y,12,MUTED)
+                button(id,value,x,y+17,w,32)
+            end
+            heading("ENGINE",ui.x+92,ui.y+100)
+            heading("GAME SETTINGS",ui.x+330,ui.y+100)
+            add(ui.objects,"Square",{Position=Vector2.new(ui.x+84,ui.y+120),Size=Vector2.new(220,210),Color=Color3.fromRGB(31,37,49),Filled=true,Rounding=10,Visible=true,ZIndex=192})
+            add(ui.objects,"Square",{Position=Vector2.new(ui.x+320,ui.y+120),Size=Vector2.new(276,210),Color=Color3.fromRGB(31,37,49),Filled=true,Rounding=10,Visible=true,ZIndex=192})
+            row("engine","Engine",ENGINE=="maia" and "Maia (Human)" or "Stockfish",ui.x+104,ui.y+143,180)
+            row("strength","Strength",STRENGTH,ui.x+104,ui.y+198,180)
+            row("elo","Target Elo",tostring(TARGET_ELO or "Off"),ui.x+104,ui.y+253,180)
+            row("side","Play as",PLAY_AS,ui.x+340,ui.y+143,230)
+            row("style","Style",PLAY_STYLE,ui.x+340,ui.y+198,230)
+            row("opening","Opening",OPENING_NAME,ui.x+340,ui.y+253,230)
+            heading("ACTIONS",ui.x+92,ui.y+360)
+            add(ui.objects,"Square",{Position=Vector2.new(ui.x+84,ui.y+380),Size=Vector2.new(512,90),Color=Color3.fromRGB(31,37,49),Filled=true,Rounding=10,Visible=true,ZIndex=192})
+            button("newgame","New Game",ui.x+104,ui.y+405,145,34)
+            button("calibrate","Calibrate",ui.x+264,ui.y+405,145,34)
+            button("hide","Minimize",ui.x+424,ui.y+405,145,34)
+        end
+        local function rebuild()
+            for _, object in ipairs(ui.objects) do pcall(function() object:Remove() end) end
+            ui.objects, ui.controls = {}, {}
+            panel()
+        end
+        function ui:choose(kind)
+            self.popup=false; self.selected=kind
+            for _, object in ipairs(self.objects) do pcall(function() object:Remove() end) end
+            self.objects={}; self.controls={}
+            if kind=="custom" then panel(); if self.callbacks.onCustom then self.callbacks.onCustom() end
+            elseif self.callbacks.onMatcha then self.visible=false; self.callbacks.onMatcha() end
+        end
+        function ui:step()
+            if not self.visible then return end
+            local mouse=player and player:GetMouse(); local down=ismouse1pressed()
+            local shift = false
+            pcall(function() shift = game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.RightShift) end)
+            if shift and not self.rightShift then self.visible = not self.visible end
+            self.rightShift = shift
+            if not self.visible then return end
+            if self.selected == "custom" and mouse then
+                if down and not self.dragging and inside(mouse,self.x,self.y,self.w,70) then
+                    self.dragging, self.dragX, self.dragY = true, mouse.X, mouse.Y
+                elseif not down then
+                    self.dragging = false
+                end
+                if self.dragging then
+                    local dx,dy=mouse.X-self.dragX,mouse.Y-self.dragY
+                    self.x,self.y=self.x+dx,self.y+dy; self.dragX,self.dragY=mouse.X,mouse.Y
+                    for _, object in ipairs(self.objects) do pcall(function() object.Position=Vector2.new(object.Position.X+dx,object.Position.Y+dy) end) end
+                    for _, control in ipairs(self.controls) do control.x,control.y=control.x+dx,control.y+dy end
+                    return
+                end
+            end
+            if down and not self.pressed then
+                for _, control in ipairs(self.controls) do
+                    if inside(mouse,control.x,control.y,control.w,control.h) then
+                        if control.id=="custom" or control.id=="matcha" then self:choose(control.id)
+                        elseif control.id=="hide" then self.visible=false
+                        elseif self.callbacks[control.id] then self.callbacks[control.id](); rebuild() end
+                        break
+                    end
+                end
+            end
+            self.pressed=down
+        end
+        popup()
+        return ui
+    end
+end
+
+setupInterfaceChoice()
+
+if not useCustomUI and UI and UI.AddTab then
     UI.AddTab("RoChess AI", function(tab)
         local settings = tab:Section("Game Settings", "Left")
         settings:Combo("chess_play_as", "Play as", {"White", "Black"}, 0, function(_, text)
@@ -155,8 +486,27 @@ if UI and UI.AddTab then
         settings:Text("Target Elo overrides the preset strength.")
         settings:Text("Select your color before playing.")
         settings:Text("Best move: green arrow")
+        settings:Button("Start visual calibration", function()
+            beginVisualCalibration()
+        end)
+        settings:Button("Save visual calibration", function()
+            calibrationConfirm = true
+        end)
+        settings:Button("Delete saved calibration", function()
+            pcall(function()
+                if isfile(CALIBRATION_FILE) then delfile(CALIBRATION_FILE) end
+            end)
+            calibrationOffsetX, calibrationOffsetY = 0, 0
+            calibrationSaved, calibrationSignature = false, nil
+            beginVisualCalibration()
+            print("[Chess Detect] Saved calibration deleted")
+        end)
         settings:Button("New Game", function()
             newGameRequested = true
+        end)
+        settings:Button("Use RoChess UI next launch", function()
+            pcall(function() writefile(CUSTOM_UI_CHOICE_FILE, HttpService:JSONEncode({choice="custom"})) end)
+            print("[Chess Detect] RoChess UI saved for next launch")
         end)
         local position = tab:Section("Position Import", "Right")
         local fenInput = position:InputText("chess_fen", "FEN position", "", function(text)
@@ -225,10 +575,6 @@ local function fenPieces(fen)
     assert(full and full >= 1 and full % 1 == 0, "Invalid FEN: bad fullmove number")
     return result, fields[2] == "w", rights, ep, half, full
 end
-
-local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
-local player = Players.LocalPlayer
 
 local function child(parent, name)
     return parent and parent:FindFirstChild(name) or nil
@@ -419,6 +765,10 @@ local function scan()
         boardCenters[squareName(square.index)] = Vector2.new(square.x + width / 2, square.y + height / 2)
         boardSquareObjects[squareName(square.index)] = squareFolder:FindFirstChild("S" .. tostring(square.index))
     end
+    local firstSquare = byIndex[1]
+    local lastSquare = byIndex[64]
+    local signature = string.format("%.1f,%.1f,%.1f,%.1f,%.1f,%.1f", firstSquare.x, firstSquare.y, spacing, lastSquare.x, lastSquare.y, #squares)
+    saveCalibration(signature)
     local tokens, occupied = {}, {}
     for _, piece in ipairs(pieceFolder:GetChildren()) do
         if piece.ClassName == "ImageLabel" or piece.ClassName == "ImageButton" then
@@ -729,7 +1079,8 @@ end
 
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
-    if UI and UI.GetValue then
+    if customUI and useCustomUI then customUI:step() end
+    if not useCustomUI and UI and UI.GetValue then
         local selected = selectedPlayAs(UI.GetValue("chess_play_as"))
         if selected and lastPlayAsSelection == nil then
             lastPlayAsSelection = selected
@@ -755,6 +1106,10 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     end
     wait(SCAN_DELAY)
     local success, current = pcall(scan)
+    if success and calibrationActive then
+        updateVisualCalibration()
+        continue
+    end
     if openingRefreshRequested and success then
         local atStart, detectedTypes = isStartingPosition(current)
         if atStart then
