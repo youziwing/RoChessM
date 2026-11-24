@@ -876,9 +876,8 @@ local function askStockfish(fen, avoidMoves)
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
     local body = HttpService:JSONEncode(request)
     local headers = nil
-    if API_KEY ~= "" then
-        headers = { ["X-API-Key"] = API_KEY }
-    end
+    headers = { ["X-RoChess-Session"] = ROCHESS_SESSION }
+    if API_KEY ~= "" then headers["X-API-Key"] = API_KEY end
     local raw = httppost(API_URL, body, "application/json", headers)
     if raw == "" then return nil, "No response from the public Render API" end
     local ok, result = pcall(function() return HttpService:JSONDecode(raw) end)
