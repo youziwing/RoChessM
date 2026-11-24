@@ -5,19 +5,9 @@ local player = Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
 local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
 _G.__ROCHESS_SESSION = ROCHESS_SESSION
-local TRACKING_FILE = "rochess_username_tracking.json"
-local TRACK_USERNAME = false
-local trackingPrompt = true
-local trackingObjects = {}
-local trackingPressed = false
-local saveTrackingChoice
-pcall(function()
-    local saved = HttpService:JSONDecode(readfile(TRACKING_FILE))
-    if type(saved) == "table" and saved.choice ~= nil then
-        TRACK_USERNAME = saved.choice == true
-        trackingPrompt = false
-    end
-end)
+local DEVICE_ID = "anonymous"
+pcall(function() DEVICE_ID = tostring(gethwid()) end)
+if DEVICE_ID == "" or DEVICE_ID == "nil" then DEVICE_ID = "anonymous" end
 local SCAN_DELAY = 0.08
 local SETTLE_DELAY = 0.025
 local SETTLE_STABLE_SCANS = 2
@@ -244,58 +234,6 @@ end
 
 local RoChessUI
 local function setupInterfaceChoice()
-    -- Ask for tracking consent before loading any RoChess/JDUI window.
-    -- This keeps the consent dialog from appearing behind the main interface.
-    if trackingPrompt then
-        local objects = {}
-        local function box(x, y, w, h, color, z)
-            local object = Drawing.new("Square")
-            object.Position, object.Size, object.Color = Vector2.new(x, y), Vector2.new(w, h), color
-            object.Filled, object.Transparency, object.Visible, object.ZIndex = true, 1, true, z or 501
-            objects[#objects + 1] = object
-        end
-        local function label(value, x, y, size, color)
-            local object = Drawing.new("Text")
-            object.Text, object.Position, object.Size = value, Vector2.new(x, y), size
-            object.Color, object.Outline, object.Visible, object.ZIndex = color, true, true, 502
-            objects[#objects + 1] = object
-        end
-        local sw, sh = 1920, 1080
-        pcall(function()
-            local viewport = workspace.CurrentCamera.ViewportSize
-            sw, sh = viewport.X, viewport.Y
-        end)
-        local panelW, panelH = 620, 230
-        local px, py = (sw - panelW) / 2, (sh - panelH) / 2
-        box(px, py, panelW, panelH, Color3.fromRGB(20, 26, 37), 501)
-        label("RoChess", px + 36, py + 34, 22, Color3.fromRGB(235, 240, 248))
-        label("Activity tracking", px + 36, py + 66, 13, Color3.fromRGB(150, 166, 188))
-        label("Allow your Roblox username in the private activity viewer?", px + 36, py + 105, 14, Color3.fromRGB(205, 214, 228))
-        local yesX, noX, by = px + 36, px + 330, py + 155
-        box(yesX, by, 260, 46, Color3.fromRGB(52, 71, 97), 501)
-        box(noX, by, 250, 46, Color3.fromRGB(38, 48, 65), 501)
-        label("Show my username", yesX + 58, by + 15, 14, Color3.fromRGB(245, 248, 252))
-        label("Use anonymous session", noX + 48, by + 15, 14, Color3.fromRGB(220, 227, 238))
-        local pressed = false
-        while trackingPrompt do
-            local mouse = nil
-            pcall(function() mouse = player:GetMouse() end)
-            local down = false
-            pcall(function() down = ismouse1pressed() end)
-            if down and not pressed and mouse then
-                if mouse.X >= yesX and mouse.X <= yesX + 260 and mouse.Y >= by and mouse.Y <= by + 46 then
-                    TRACK_USERNAME, trackingPrompt = true, false
-                    pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=true})) end)
-                elseif mouse.X >= noX and mouse.X <= noX + 250 and mouse.Y >= by and mouse.Y <= by + 46 then
-                    TRACK_USERNAME, trackingPrompt = false, false
-                    pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=false})) end)
-                end
-            end
-            pressed = down
-            if trackingPrompt then wait(0.03) end
-        end
-        for _, object in ipairs(objects) do pcall(function() object:Remove() end) end
-    end
     local savedChoice
     pcall(function()
         if isfile(CUSTOM_UI_CHOICE_FILE) then
@@ -941,11 +879,7 @@ local function askStockfish(fen, avoidMoves)
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
     local body = HttpService:JSONEncode(request)
     local headers = nil
-    headers = { ["X-RoChess-Session"] = ROCHESS_SESSION }
-    if TRACK_USERNAME then
-        request.username = player and player.Name or nil
-        headers["X-RoChess-Username"] = request.username or ""
-    end
+    headers = { ["X-RoChess-Session"] = ROCHESS_SESSION, ["X-RoChess-Device"] = DEVICE_ID }
     if API_KEY ~= "" then headers["X-API-Key"] = API_KEY end
     local raw = httppost(API_URL, body, "application/json", headers)
     if raw == "" then return nil, "No response from the public Render API" end
@@ -953,58 +887,6 @@ local function askStockfish(fen, avoidMoves)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
-end
-
-local function clearTrackingPrompt()
-    for _, object in ipairs(trackingObjects) do pcall(function() object:Remove() end) end
-    trackingObjects = {}
-end
-
-local function trackingText(value, x, y, size, color)
-    local object = Drawing.new("Text")
-    object.Text, object.Position, object.Size = value, Vector2.new(x, y), size
-    object.Color, object.Outline, object.Visible, object.ZIndex = color, true, true, 502
-    trackingObjects[#trackingObjects + 1] = object
-end
-
-local function trackingBox(x, y, w, h, color)
-    local object = Drawing.new("Square")
-    object.Position, object.Size, object.Color = Vector2.new(x, y), Vector2.new(w, h), color
-    object.Filled, object.Transparency, object.Visible, object.ZIndex = true, 1, true, 501
-    trackingObjects[#trackingObjects + 1] = object
-end
-
-saveTrackingChoice = function(enabled)
-    TRACK_USERNAME = enabled
-    trackingPrompt = false
-    pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=enabled})) end)
-    clearTrackingPrompt()
-end
-
-local function stepTrackingPrompt()
-    if not trackingPrompt then return end
-    if #trackingObjects == 0 then
-        trackingBox(610, 330, 700, 250, Color3.fromRGB(20, 26, 37))
-        trackingText("RoChess", 655, 365, 22, Color3.fromRGB(235, 240, 248))
-        trackingText("Activity tracking", 655, 397, 13, Color3.fromRGB(150, 166, 188))
-        trackingText("Allow your Roblox username in the private activity viewer?", 655, 438, 14, Color3.fromRGB(205, 214, 228))
-        trackingBox(655, 485, 255, 48, Color3.fromRGB(52, 71, 97))
-        trackingBox(935, 485, 305, 48, Color3.fromRGB(38, 48, 65))
-        trackingText("Show my username", 705, 503, 14, Color3.fromRGB(245, 248, 252))
-        trackingText("Use anonymous session", 975, 503, 14, Color3.fromRGB(220, 227, 238))
-    end
-    local mouse = nil
-    pcall(function() mouse = player:GetMouse() end)
-    local down = false
-    pcall(function() down = ismouse1pressed() end)
-    if down and not trackingPressed and mouse then
-        if mouse.X >= 655 and mouse.X <= 910 and mouse.Y >= 485 and mouse.Y <= 533 then
-            saveTrackingChoice(true)
-        elseif mouse.X >= 935 and mouse.X <= 1240 and mouse.Y >= 485 and mouse.Y <= 533 then
-            saveTrackingChoice(false)
-        end
-    end
-    trackingPressed = down
 end
 
 local function bestMove(fen, snapshot, avoidMoves)
@@ -1126,13 +1008,30 @@ local function updateStockfishStatus(online, detail)
         print("[Stockfish] service is back online")
         pcall(function() notify("Stockfish", "Service is back online", 5) end)
     else
-        local message = "Script is currently down: Stockfish service unavailable"
+        local message = describeAnalysisError(detail)
         if detail and tostring(detail) ~= "" then
             message = message .. " (" .. tostring(detail) .. ")"
         end
         print("[Stockfish] " .. message)
         pcall(function() notify("Stockfish", message, 8) end)
     end
+end
+
+local function describeAnalysisError(errorMessage)
+    local message = tostring(errorMessage or "No best move returned")
+    local lower = string.lower(message)
+    if string.find(lower, "no legal moves") or string.find(lower, "no best move") then
+        return "No legal move: the game may be over or the detected board is incomplete"
+    elseif string.find(lower, "illegal position") or string.find(lower, "invalid fen") then
+        return "Invalid board position: the detected pieces do not form a legal chess position"
+    elseif string.find(lower, "timed out") or string.find(lower, "timeout") then
+        return "Analysis timed out: Stockfish did not respond in time"
+    elseif string.find(lower, "api key") or string.find(lower, "401") then
+        return "Authentication failed: the API key is invalid or missing"
+    elseif string.find(lower, "no response") or string.find(lower, "service unavailable") or string.find(lower, "502") or string.find(lower, "503") then
+        return "Stockfish service is offline or unreachable"
+    end
+    return "Analysis failed: " .. message
 end
 
 local function recommend(snapshot)
@@ -1145,7 +1044,7 @@ local function recommend(snapshot)
     local result, errorMessage = bestMove(fen, snapshot)
     if not result or not result.bestmove then
         updateStockfishStatus(false, errorMessage)
-        print("[Chess Detect] Script is currently down: Stockfish unavailable - " .. tostring(errorMessage or "No best move returned"))
+        print("[Chess Detect] " .. describeAnalysisError(errorMessage))
         analysisRetryAt = tick() + 2
         return false
     end
@@ -1198,7 +1097,6 @@ end
 
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
-    stepTrackingPrompt()
     if customUI and useCustomUI then customUI:step() end
     if not useCustomUI and UI and UI.GetValue then
         local selected = selectedPlayAs(UI.GetValue("chess_play_as"))
@@ -1530,7 +1428,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         print("[Stockfish " .. backend .. "] " .. message)
                     elseif errorMessage then
                         updateStockfishStatus(false, errorMessage)
-                        print("[Chess Detect] Script is currently down: Stockfish unavailable - " .. tostring(errorMessage))
+                        print("[Chess Detect] " .. describeAnalysisError(errorMessage))
                     end
                 end
             end
