@@ -5,6 +5,18 @@ local player = Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
 local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
 _G.__ROCHESS_SESSION = ROCHESS_SESSION
+local TRACKING_FILE = "rochess_username_tracking.json"
+local TRACK_USERNAME = false
+local trackingPrompt = true
+local trackingObjects = {}
+local trackingPressed = false
+pcall(function()
+    local saved = HttpService:JSONDecode(readfile(TRACKING_FILE))
+    if type(saved) == "table" and saved.choice ~= nil then
+        TRACK_USERNAME = saved.choice == true
+        trackingPrompt = false
+    end
+end)
 local SCAN_DELAY = 0.08
 local SETTLE_DELAY = 0.025
 local SETTLE_STABLE_SCANS = 2
@@ -877,6 +889,10 @@ local function askStockfish(fen, avoidMoves)
     local body = HttpService:JSONEncode(request)
     local headers = nil
     headers = { ["X-RoChess-Session"] = ROCHESS_SESSION }
+    if TRACK_USERNAME then
+        request.username = player and player.Name or nil
+        headers["X-RoChess-Username"] = request.username or ""
+    end
     if API_KEY ~= "" then headers["X-API-Key"] = API_KEY end
     local raw = httppost(API_URL, body, "application/json", headers)
     if raw == "" then return nil, "No response from the public Render API" end
@@ -884,6 +900,57 @@ local function askStockfish(fen, avoidMoves)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
+end
+
+local function clearTrackingPrompt()
+    for _, object in ipairs(trackingObjects) do pcall(function() object:Remove() end) end
+    trackingObjects = {}
+end
+
+local function trackingText(value, x, y, size, color)
+    local object = Drawing.new("Text")
+    object.Text, object.Position, object.Size = value, Vector2.new(x, y), size
+    object.Color, object.Outline, object.Visible, object.ZIndex = color, true, true, 500
+    trackingObjects[#trackingObjects + 1] = object
+end
+
+local function trackingBox(x, y, w, h, color)
+    local object = Drawing.new("Square")
+    object.Position, object.Size, object.Color = Vector2.new(x, y), Vector2.new(w, h), color
+    object.Filled, object.Visible, object.ZIndex = true, true, 499
+    trackingObjects[#trackingObjects + 1] = object
+end
+
+local function saveTrackingChoice(enabled)
+    TRACK_USERNAME = enabled
+    trackingPrompt = false
+    pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=enabled})) end)
+    clearTrackingPrompt()
+end
+
+local function stepTrackingPrompt()
+    if not trackingPrompt then return end
+    if #trackingObjects == 0 then
+        trackingBox(0, 0, 1920, 1080, Color3.fromRGB(8, 11, 17))
+        trackingText("RoChess activity tracking", 590, 330, 22, Color3.fromRGB(235, 240, 248))
+        trackingText("Allow your Roblox username to appear in the private activity viewer?", 520, 375, 14, Color3.fromRGB(180, 190, 205))
+        trackingBox(550, 430, 190, 48, Color3.fromRGB(45, 60, 82))
+        trackingBox(760, 430, 250, 48, Color3.fromRGB(45, 60, 82))
+        trackingText("Yes, show my username", 575, 450, 15, Color3.fromRGB(235, 240, 248))
+        trackingText("No, use an anonymous session", 780, 450, 15, Color3.fromRGB(235, 240, 248))
+    end
+    local mouse = nil
+    pcall(function() mouse = player:GetMouse() end)
+    local down = false
+    pcall(function() down = ismouse1pressed() end)
+    if down and not trackingPressed and mouse then
+        if mouse.X >= 550 and mouse.X <= 740 and mouse.Y >= 430 and mouse.Y <= 478 then
+            saveTrackingChoice(true)
+        elseif mouse.X >= 760 and mouse.X <= 1010 and mouse.Y >= 430 and mouse.Y <= 478 then
+            saveTrackingChoice(false)
+        end
+    end
+    trackingPressed = down
 end
 
 local function bestMove(fen, snapshot, avoidMoves)
@@ -1077,6 +1144,7 @@ end
 
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
+    stepTrackingPrompt()
     if customUI and useCustomUI then customUI:step() end
     if not useCustomUI and UI and UI.GetValue then
         local selected = selectedPlayAs(UI.GetValue("chess_play_as"))
