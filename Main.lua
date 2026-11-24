@@ -10,6 +10,7 @@ local TRACK_USERNAME = false
 local trackingPrompt = true
 local trackingObjects = {}
 local trackingPressed = false
+local saveTrackingChoice
 pcall(function()
     local saved = HttpService:JSONDecode(readfile(TRACKING_FILE))
     if type(saved) == "table" and saved.choice ~= nil then
@@ -243,6 +244,58 @@ end
 
 local RoChessUI
 local function setupInterfaceChoice()
+    -- Ask for tracking consent before loading any RoChess/JDUI window.
+    -- This keeps the consent dialog from appearing behind the main interface.
+    if trackingPrompt then
+        local objects = {}
+        local function box(x, y, w, h, color, z)
+            local object = Drawing.new("Square")
+            object.Position, object.Size, object.Color = Vector2.new(x, y), Vector2.new(w, h), color
+            object.Filled, object.Transparency, object.Visible, object.ZIndex = true, 1, true, z or 501
+            objects[#objects + 1] = object
+        end
+        local function label(value, x, y, size, color)
+            local object = Drawing.new("Text")
+            object.Text, object.Position, object.Size = value, Vector2.new(x, y), size
+            object.Color, object.Outline, object.Visible, object.ZIndex = color, true, true, 502
+            objects[#objects + 1] = object
+        end
+        local sw, sh = 1920, 1080
+        pcall(function()
+            local viewport = workspace.CurrentCamera.ViewportSize
+            sw, sh = viewport.X, viewport.Y
+        end)
+        local panelW, panelH = 620, 230
+        local px, py = (sw - panelW) / 2, (sh - panelH) / 2
+        box(px, py, panelW, panelH, Color3.fromRGB(20, 26, 37), 501)
+        label("RoChess", px + 36, py + 34, 22, Color3.fromRGB(235, 240, 248))
+        label("Activity tracking", px + 36, py + 66, 13, Color3.fromRGB(150, 166, 188))
+        label("Allow your Roblox username in the private activity viewer?", px + 36, py + 105, 14, Color3.fromRGB(205, 214, 228))
+        local yesX, noX, by = px + 36, px + 330, py + 155
+        box(yesX, by, 260, 46, Color3.fromRGB(52, 71, 97), 501)
+        box(noX, by, 250, 46, Color3.fromRGB(38, 48, 65), 501)
+        label("Show my username", yesX + 58, by + 15, 14, Color3.fromRGB(245, 248, 252))
+        label("Use anonymous session", noX + 48, by + 15, 14, Color3.fromRGB(220, 227, 238))
+        local pressed = false
+        while trackingPrompt do
+            local mouse = nil
+            pcall(function() mouse = player:GetMouse() end)
+            local down = false
+            pcall(function() down = ismouse1pressed() end)
+            if down and not pressed and mouse then
+                if mouse.X >= yesX and mouse.X <= yesX + 260 and mouse.Y >= by and mouse.Y <= by + 46 then
+                    TRACK_USERNAME, trackingPrompt = true, false
+                    pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=true})) end)
+                elseif mouse.X >= noX and mouse.X <= noX + 250 and mouse.Y >= by and mouse.Y <= by + 46 then
+                    TRACK_USERNAME, trackingPrompt = false, false
+                    pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=false})) end)
+                end
+            end
+            pressed = down
+            if trackingPrompt then wait(0.03) end
+        end
+        for _, object in ipairs(objects) do pcall(function() object:Remove() end) end
+    end
     local savedChoice
     pcall(function()
         if isfile(CUSTOM_UI_CHOICE_FILE) then
@@ -910,18 +963,18 @@ end
 local function trackingText(value, x, y, size, color)
     local object = Drawing.new("Text")
     object.Text, object.Position, object.Size = value, Vector2.new(x, y), size
-    object.Color, object.Outline, object.Visible, object.ZIndex = color, true, true, 500
+    object.Color, object.Outline, object.Visible, object.ZIndex = color, true, true, 502
     trackingObjects[#trackingObjects + 1] = object
 end
 
 local function trackingBox(x, y, w, h, color)
     local object = Drawing.new("Square")
     object.Position, object.Size, object.Color = Vector2.new(x, y), Vector2.new(w, h), color
-    object.Filled, object.Visible, object.ZIndex = true, true, 499
+    object.Filled, object.Transparency, object.Visible, object.ZIndex = true, 1, true, 501
     trackingObjects[#trackingObjects + 1] = object
 end
 
-local function saveTrackingChoice(enabled)
+saveTrackingChoice = function(enabled)
     TRACK_USERNAME = enabled
     trackingPrompt = false
     pcall(function() writefile(TRACKING_FILE, HttpService:JSONEncode({choice=enabled})) end)
@@ -931,22 +984,23 @@ end
 local function stepTrackingPrompt()
     if not trackingPrompt then return end
     if #trackingObjects == 0 then
-        trackingBox(0, 0, 1920, 1080, Color3.fromRGB(8, 11, 17))
-        trackingText("RoChess activity tracking", 590, 330, 22, Color3.fromRGB(235, 240, 248))
-        trackingText("Allow your Roblox username to appear in the private activity viewer?", 520, 375, 14, Color3.fromRGB(180, 190, 205))
-        trackingBox(550, 430, 190, 48, Color3.fromRGB(45, 60, 82))
-        trackingBox(760, 430, 250, 48, Color3.fromRGB(45, 60, 82))
-        trackingText("Yes, show my username", 575, 450, 15, Color3.fromRGB(235, 240, 248))
-        trackingText("No, use an anonymous session", 780, 450, 15, Color3.fromRGB(235, 240, 248))
+        trackingBox(610, 330, 700, 250, Color3.fromRGB(20, 26, 37))
+        trackingText("RoChess", 655, 365, 22, Color3.fromRGB(235, 240, 248))
+        trackingText("Activity tracking", 655, 397, 13, Color3.fromRGB(150, 166, 188))
+        trackingText("Allow your Roblox username in the private activity viewer?", 655, 438, 14, Color3.fromRGB(205, 214, 228))
+        trackingBox(655, 485, 255, 48, Color3.fromRGB(52, 71, 97))
+        trackingBox(935, 485, 305, 48, Color3.fromRGB(38, 48, 65))
+        trackingText("Show my username", 705, 503, 14, Color3.fromRGB(245, 248, 252))
+        trackingText("Use anonymous session", 975, 503, 14, Color3.fromRGB(220, 227, 238))
     end
     local mouse = nil
     pcall(function() mouse = player:GetMouse() end)
     local down = false
     pcall(function() down = ismouse1pressed() end)
     if down and not trackingPressed and mouse then
-        if mouse.X >= 550 and mouse.X <= 740 and mouse.Y >= 430 and mouse.Y <= 478 then
+        if mouse.X >= 655 and mouse.X <= 910 and mouse.Y >= 485 and mouse.Y <= 533 then
             saveTrackingChoice(true)
-        elseif mouse.X >= 760 and mouse.X <= 1010 and mouse.Y >= 430 and mouse.Y <= 478 then
+        elseif mouse.X >= 935 and mouse.X <= 1240 and mouse.Y >= 485 and mouse.Y <= 533 then
             saveTrackingChoice(false)
         end
     end
