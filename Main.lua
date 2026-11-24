@@ -2,18 +2,24 @@
 local FLIP_BOARD = false
 local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
 _G.__ROCHESS_SESSION = ROCHESS_SESSION
-local SCAN_DELAY = 0.15
+local SCAN_DELAY = 0.08
+local SETTLE_DELAY = 0.025
+local SETTLE_STABLE_SCANS = 2
 local API_URL = "https://rochess-gateway-new.vercel.app/api/analyze"
 local STATUS_URL = "https://rochess-gateway-new.vercel.app/api/health"
 local STATUS_INTERVAL = 10
 local API_KEY = ""
 local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
+local PLAY_STYLE = "standard"
+local ENGINE = "stockfish"
 local SECOND_MOVE_ENABLED = true
 local TARGET_ELO = nil
 local OPENING_NAME = "Automatic"
 local openingActive = false
 local moveHistory = {}
+local positionCounts = {}
+local lastPlayedUci = nil
 local openingRefreshRequested = false
 local openingLines = {
     ["Italian Game"] = {"e2e4", "e7e5", "g1f3", "b8c6", "f1c4"},
@@ -25,12 +31,13 @@ local openingLines = {
     ["King's Indian Defense"] = {"d2d4", "g8f6", "c2c4", "g7g6"},
     ["English Opening"] = {"c2c4", "e7e5", "b1c3", "g8f6"},
 }
-local PLAY_AS = "White" -- "White", "Black", or "Any"
+local PLAY_AS = "White" -- "White" or "Black"
 local AUTO_DETECT_COLOR = true
-local orientationChanged = false
+local lastPlayAsSelection = nil
 local boardCenters = {}
 local boardSquareObjects = {}
 local arrows = {}
+local applyPlayAs
 local pendingFen = nil
 local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
@@ -104,11 +111,18 @@ end
 if UI and UI.AddTab then
     UI.AddTab("RoChess AI", function(tab)
         local settings = tab:Section("Game Settings", "Left")
-        settings:Combo("chess_play_as", "Play as", {"White", "Black", "Any"}, 0, function(_, text)
-            applyPlayAs(text)
+        settings:Combo("chess_play_as", "Play as", {"White", "Black"}, 0, function(_, text)
+            -- The polling logic below handles changes. Do not treat the
+            -- initial callback as a manual override.
         end)
         settings:Combo("chess_strength", "Strength", {"Low", "Medium", "High"}, 2, function(_, text)
             STRENGTH = string.lower(text)
+        end)
+        settings:Combo("chess_style", "Playing style", {"Standard", "Aggressive", "Defensive"}, 0, function(_, text)
+            PLAY_STYLE = string.lower(text)
+        end)
+        settings:Combo("chess_engine", "Engine", {"Stockfish", "Maia (Human Like)"}, 0, function(_, text)
+            ENGINE = text == "Maia (Human Like)" and "maia" or "stockfish"
         end)
         settings:Combo("chess_second_move", "Second best move", {"Off", "On"}, 1, function(_, text)
             SECOND_MOVE_ENABLED = text == "On"
@@ -287,8 +301,10 @@ local function pieceCode(pieceType)
 end
 
 local cachedSquareFolder, cachedPieceFolder
-local function getBoard()
-    if cachedSquareFolder and cachedPieceFolder then return cachedSquareFolder, cachedPieceFolder end
+local function getBoard(forceRefresh)
+    if not forceRefresh and cachedSquareFolder and cachedPieceFolder then
+        return cachedSquareFolder, cachedPieceFolder
+    end
     local gui = child(player, "PlayerGui")
     for _ = 1, 80 do
         local board = child(child(child(gui, "ChessUI"), "Root"), "Board")
@@ -303,10 +319,22 @@ local function getBoard()
 end
 
 local function detectPlayAs()
-    local squares = cachedSquareFolder
-    local coords = squares and squares.Parent and squares.Parent:FindFirstChild("Coords")
-    local rank1 = coords and coords:FindFirstChild("Rank1")
-    local file1 = coords and coords:FindFirstChild("File1")
+    local okBoard, squares = pcall(function()
+        return select(1, getBoard(true))
+    end)
+    if not okBoard then return nil end
+    -- RoChess currently stores the coordinate labels in an unnamed sibling
+    -- Frame under Board; older builds used a named Coords Frame. Search the
+    -- board subtree so both layouts work.
+    local board = squares and squares.Parent
+    local rank1, file1
+    if board then
+        for _, object in ipairs(board:GetDescendants()) do
+            if object.Name == "Rank1" then rank1 = object end
+            if object.Name == "File1" then file1 = object end
+            if rank1 and file1 then break end
+        end
+    end
     if not rank1 or not file1 then return nil end
     local ok, rankText, fileText = pcall(function()
         return tostring(rank1.Text), tostring(file1.Text):lower()
@@ -317,7 +345,19 @@ local function detectPlayAs()
     return nil
 end
 
-local function applyPlayAs(color)
+local function selectedPlayAs(value)
+    if type(value) == "string" then
+        local text = value:lower()
+        if text == "white" then return "White" end
+        if text == "black" then return "Black" end
+    elseif type(value) == "number" then
+        if value == 0 then return "White" end
+        if value == 1 then return "Black" end
+    end
+    return nil
+end
+
+function applyPlayAs(color)
     if color ~= "White" and color ~= "Black" and color ~= "Any" then return end
     local oldColor = PLAY_AS
     PLAY_AS = color
@@ -325,7 +365,6 @@ local function applyPlayAs(color)
     -- Do not reverse their chess coordinates a second time.
     FLIP_BOARD = false
     if oldColor ~= PLAY_AS then
-        orientationChanged = true
         newGameRequested = true
         boardCenters = {}
         removeArrow()
@@ -457,6 +496,17 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
 
+local function positionKey(fen)
+    return tostring(fen):match("^(%S+ %S+ %S+ %S+)") or tostring(fen)
+end
+
+local function recordPosition(snapshot)
+    local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
+    local key = positionKey(fen)
+    positionCounts[key] = (positionCounts[key] or 0) + 1
+    return positionCounts[key], key
+end
+
 local function positionReady(snapshot)
     local whiteKing, blackKing, typed = 0, 0, 0
     for token, square in pairs(snapshot) do
@@ -471,7 +521,7 @@ local function positionReady(snapshot)
     return true
 end
 local function askStockfish(fen, avoidMoves)
-    local request = {fen=fen, strength=STRENGTH}
+    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE}
     if SECOND_MOVE_ENABLED then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
@@ -486,24 +536,6 @@ local function askStockfish(fen, avoidMoves)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
-end
-
-local function openingMove(snapshot)
-    if not openingActive or OPENING_NAME == "Automatic" then return nil end
-    local line = openingLines[OPENING_NAME]
-    local expected = line and line[#moveHistory + 1]
-    if not expected then return nil end
-    local fromSquare, toSquare = expected:sub(1, 2), expected:sub(3, 4)
-    local hasSource = false
-    for _, square in pairs(snapshot) do
-        if square == fromSquare then hasSource = true break end
-    end
-    if not hasSource then
-        openingActive = false
-        print("[Chess] Opening line ended: move is not legal in the current position")
-        return nil
-    end
-    return expected
 end
 
 local function bestMove(fen, snapshot, avoidMoves)
@@ -611,6 +643,8 @@ local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
     analysisRetryAt = tick()
     pendingFen = nil
     pendingPromotion = nil
+    positionCounts = {}
+    lastPlayedUci = nil
     removeArrow()
 end
 
@@ -675,22 +709,48 @@ local function recommend(snapshot)
     return true
 end
 
+local function settleSnapshot(firstSnapshot)
+    local latest = firstSnapshot
+    local stableScans = 0
+    local deadline = tick() + 0.30
+    while stableScans < SETTLE_STABLE_SCANS and tick() < deadline do
+        wait(SETTLE_DELAY)
+        local ok, nextSnapshot = pcall(scan)
+        if not ok then return false, latest end
+        if sameSnapshot(latest, nextSnapshot) then
+            stableScans = stableScans + 1
+        else
+            latest = nextSnapshot
+            stableScans = 0
+        end
+    end
+    return stableScans >= SETTLE_STABLE_SCANS, latest
+end
+
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
+    if UI and UI.GetValue then
+        local selected = selectedPlayAs(UI.GetValue("chess_play_as"))
+        if selected and lastPlayAsSelection == nil then
+            lastPlayAsSelection = selected
+            -- White is the default UI value, so preserve automatic detection
+            -- for it. Black on the initial screen is an explicit useful
+            -- choice and must not be discarded before the first scan.
+            if selected == "Black" then
+                AUTO_DETECT_COLOR = false
+                applyPlayAs(selected)
+            end
+        elseif selected and selected ~= lastPlayAsSelection then
+            lastPlayAsSelection = selected
+            AUTO_DETECT_COLOR = false
+            applyPlayAs(selected)
+        end
+    end
     if AUTO_DETECT_COLOR then
         local detected = detectPlayAs()
         if detected and detected ~= PLAY_AS then
             applyPlayAs(detected)
             print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
-        end
-    elseif UI and UI.GetValue then
-        local selected = UI.GetValue("chess_play_as")
-        if selected == 0 then
-            applyPlayAs("White")
-        elseif selected == 1 then
-            applyPlayAs("Black")
-        elseif selected == 2 then
-            applyPlayAs("Any")
         end
     end
     wait(SCAN_DELAY)
@@ -732,6 +792,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             for _ in pairs(pieceTypes) do count = count + 1 end
             atStartingPosition = count == 32
         end
+        positionCounts = {}
+        lastPlayedUci = nil
         previous = current
         if PLAY_AS == "Black" and not atStartingPosition then
             whiteToMove = false
@@ -763,6 +825,9 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             halfmove, fullmove = importedHalf, importedFull
             previous = current
             whiteToMove = side
+            positionCounts = {}
+            lastPlayedUci = nil
+            recordPosition(current)
             awaitingImport = false
             initialAnalysisPending = true
             importStatus = "Position imported"
@@ -790,6 +855,9 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 pieceTypes = candidateTypes
                 previous = current
                 whiteToMove = true
+                positionCounts = {}
+                lastPlayedUci = nil
+                recordPosition(current)
                 halfmove, fullmove = 0, 1
                 castlingRights, enPassantTarget = "KQkq", "-"
                 awaitingImport = false
@@ -818,9 +886,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         end
     end
     if success and not sameSnapshot(previous, current) then
-        wait(SCAN_DELAY)
-        local stable, confirmed = pcall(scan)
-        if stable and sameSnapshot(current, confirmed) then
+        local stable, confirmed = settleSnapshot(current)
+        if stable then
             local moved, capture = {}, false
             local added, removed = {}, {}
             for token, newSquare in pairs(confirmed) do
@@ -939,6 +1006,11 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 if whiteToMove then
                     fullmove = fullmove + 1
                 end
+                lastPlayedUci = playedUci
+                local repetitionCount = recordPosition(confirmed)
+                if repetitionCount >= 2 then
+                    print("[Chess] Repetition warning: current position occurred " .. tostring(repetitionCount) .. " times")
+                end
                 local yourTurn = PLAY_AS == "Any"
                     or (PLAY_AS == "White" and whiteToMove)
                     or (PLAY_AS == "Black" and not whiteToMove)
@@ -947,7 +1019,15 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     local result, errorMessage
                     if ready then
                         local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
-                        result, errorMessage = bestMove(fen, confirmed)
+                        local avoidMoves = repetitionCount >= 2 and lastPlayedUci and {lastPlayedUci} or nil
+                        result, errorMessage = bestMove(fen, confirmed, avoidMoves)
+                    end
+                    if result then
+                        local fresh, latest = pcall(scan)
+                        if not fresh or not sameSnapshot(confirmed, latest) then
+                            result = nil
+                            removeArrow()
+                        end
                     end
                     if result then
                         updateStockfishStatus(true)
