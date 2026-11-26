@@ -26,6 +26,8 @@ local openingActive = false
 local moveHistory = {}
 local positionCounts = {}
 local lastPlayedUci = nil
+local lastRepetitionWarningKey = nil
+local lastRepetitionWarningCount = 0
 local openingRefreshRequested = false
 local openingLines = {
     ["Italian Game"] = {"e2e4", "e7e5", "g1f3", "b8c6", "f1c4"},
@@ -120,11 +122,13 @@ local function showArrow(fromSquare, toSquare, color, labelText)
     arrowLine.To = Vector2.new(toPoint.X - ux * 8, toPoint.Y - uy * 8)
     arrowLine.Color = color
     arrowLine.Thickness = 4
+    pcall(function() arrowLine.ZIndex = 900 end)
     arrowLine.Visible = true
     local arrowHead = Drawing.new("Triangle")
     arrowHead.PointA, arrowHead.PointB, arrowHead.PointC = tip, left, right
     arrowHead.Color = color
     arrowHead.Filled = true
+    pcall(function() arrowHead.ZIndex = 901 end)
     arrowHead.Visible = true
     local label
     if labelText and labelText ~= "" then
@@ -247,6 +251,10 @@ local function setupInterfaceChoice()
     end
     local ok, jdui = pcall(function()
         local source = httpget("https://raw.githubusercontent.com/jdev-studio/jdui/refs/heads/main/JDUI")
+        -- Matcha can stall when JDUI pre-scans every keyboard code on textbox focus.
+        -- Text capture still receives newly pressed keys without this pre-scan.
+        source = source:gsub('for k=8,254 do capture%.keys%[k%]=iskeypressed%(k%) end', '')
+        source = source:gsub('for k=8,254 do cap%.keys%[k%]=iskeypressed%(k%) end', '')
         -- JDUI's stock sidebar always renders a player avatar. Remove only that
         -- profile block and frame rules; the rest of the library remains unchanged.
         source = source:gsub("if not avatar%(%s*26%.5%s*,%s*26%.5%s*,%s*32%s*%) then.-end", "if false then end")
@@ -287,8 +295,22 @@ local function setupInterfaceChoice()
         ENGINE = value == "Maia (Human Like)" and "maia" or "stockfish"
     end})
     engine:AddDropdown({Title="Strength", Options={"Low","Medium","High"}, Default=STRENGTH:gsub("^%l",string.upper), Callback=function(value) STRENGTH=string.lower(value) end})
-    engine:AddTextbox({Title="Target Elo", Placeholder="800-3000 or blank", Default=TARGET_ELO and tostring(TARGET_ELO) or "", Callback=function(value)
-        local number=tonumber(value); TARGET_ELO=number and math.max(800,math.min(3000,math.floor(number+0.5))) or nil
+    local targetEloText = TARGET_ELO and tostring(TARGET_ELO) or ""
+    engine:AddTextbox({Title="Target Elo", Placeholder="800-3000 or blank", Default=TARGET_ELO and tostring(TARGET_ELO) or "", Callback=function(first, second)
+        targetEloText = tostring(second or first or "")
+    end})
+    engine:AddButton({Title="Apply Target Elo", ButtonText="Apply", Callback=function()
+        local text = tostring(targetEloText or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        local number = tonumber(text)
+        if text == "" then
+            TARGET_ELO = nil
+            print("[Chess] Target Elo cleared; using preset strength")
+        elseif number and number >= 800 and number <= 3000 then
+            TARGET_ELO = math.max(800, math.min(3000, math.floor(number + 0.5)))
+            print("[Chess] Target Elo applied: " .. tostring(TARGET_ELO) .. " (next analysis)")
+        else
+            print("[Chess] Invalid Target Elo; enter 800-3000 or leave it blank")
+        end
     end})
     local gameTab = main
     local game = gameTab:AddIsland({Title="Game settings", Description="Position and move preferences"})
@@ -299,15 +321,29 @@ local function setupInterfaceChoice()
     end})
     game:AddToggle({Title="Second best move", Default=SECOND_MOVE_ENABLED, Callback=function(value) SECOND_MOVE_ENABLED=value end})
     local actions = gameTab:AddIsland({Title="Actions", Description="Game and position controls"})
-    actions:AddButton({Title="New Game", ButtonText="Reset", Callback=function() newGameRequested=true end})
-    actions:AddButton({Title="Visual Calibration", ButtonText="Open", Callback=function() beginVisualCalibration() end})
+    actions:AddButton({Title="New Game", ButtonText="Reset", Callback=function()
+        newGameRequested = true
+        print("[Chess] New Game requested")
+    end})
+    actions:AddButton({Title="Visual Calibration", ButtonText="Open", Callback=function()
+        beginVisualCalibration()
+        print("[Chess] Visual calibration opened")
+    end})
     actions:AddButton({Title="Use Matcha UI next launch", ButtonText="Switch", Callback=function()
         pcall(function() writefile(CUSTOM_UI_CHOICE_FILE, HttpService:JSONEncode({choice="matcha"})) end)
         pcall(function() jdui:Notify({Title="Saved", Content="Matcha UI will open next launch.", Type="success", Duration=4}) end)
     end})
     local position = gameTab:AddIsland({Title="Position Import", Description="Load a FEN position"})
     position:AddTextbox({Title="FEN", Placeholder="Paste a FEN position", Default="", Callback=function(value) enteredFen=value or "" end})
-    position:AddButton({Title="Import position", ButtonText="Import", Callback=function() pendingFen=enteredFen; newGameRequested=true end})
+    position:AddButton({Title="Import position", ButtonText="Import", Callback=function()
+        if enteredFen and enteredFen ~= "" then
+            pendingFen = enteredFen
+            newGameRequested = true
+            print("[Chess] FEN import requested")
+        else
+            print("[Chess] FEN import failed: paste a FEN first")
+        end
+    end})
     jdui.Tabs = {main}
     pcall(function() jdui:SetConfig("rochess") end)
     pcall(function() jdui:SetKeybind(0xA1) end)
@@ -476,13 +512,16 @@ if not useCustomUI and UI and UI.AddTab then
             if widgetOk and widgetText then text = widgetText end
             local uiText = UI.GetValue("chess_target_elo")
             if uiText and uiText ~= "" then text = uiText end
+            text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
             local value = tonumber(text)
-            if value then
+            if text == "" then
+                TARGET_ELO = nil
+                print("[Chess] Target Elo cleared; using preset strength")
+            elseif value and value >= 800 and value <= 3000 then
                 TARGET_ELO = math.max(800, math.min(3000, math.floor(value + 0.5)))
                 print("[Chess] Target Elo set to " .. tostring(TARGET_ELO) .. " (applies to the next analysis)")
             else
-                TARGET_ELO = nil
-                print("[Chess] Target Elo cleared; using preset strength")
+                print("[Chess] Invalid Target Elo; enter 800-3000 or leave it blank")
             end
         end)
         settings:Text("Target Elo overrides the preset strength.")
@@ -844,8 +883,20 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
         if empty > 0 then row = row .. tostring(empty) end
         ranks[#ranks + 1] = row
     end
-    local rights = castlingRights == "" and "-" or castlingRights
-    return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. enPassantTarget .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
+    local rights = castlingRights
+    if board.e1 ~= "K" then rights = rights:gsub("K", ""):gsub("Q", "") end
+    if board.e8 ~= "k" then rights = rights:gsub("k", ""):gsub("q", "") end
+    if board.a1 ~= "R" then rights = rights:gsub("Q", "") end
+    if board.h1 ~= "R" then rights = rights:gsub("K", "") end
+    if board.a8 ~= "r" then rights = rights:gsub("q", "") end
+    if board.h8 ~= "r" then rights = rights:gsub("k", "") end
+    rights = rights == "" and "-" or rights
+    local ep = enPassantTarget
+    if ep ~= "-" then
+        local epRank = tonumber(ep:sub(2, 2))
+        if (whiteToMove and epRank ~= 6) or ((not whiteToMove) and epRank ~= 3) then ep = "-" end
+    end
+    return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. ep .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
 
 local function positionKey(fen)
@@ -965,11 +1016,62 @@ end
 
 local awaitingImport = known ~= 32
 
+local mirrorVisible, mirrorKeyDown, mirrorNextDraw = true, false, 0
+local mirrorObjects, mirrorLastKey = {}, nil
+local mirrorX, mirrorY, mirrorSize = 70, 110, 420
+local mirrorChars = {Pawn="P", Knight="N", Bishop="B", Rook="R", Queen="Q", King="K"}
+local function mirrorClear()
+    for _, object in ipairs(mirrorObjects) do pcall(function() object:Remove() end) end
+    mirrorObjects = {}
+end
+local function mirrorAdd(kind, props)
+    local object = Drawing.new(kind)
+    for key, value in pairs(props) do pcall(function() object[key] = value end) end
+    mirrorObjects[#mirrorObjects + 1] = object
+end
+local function mirrorDraw(snapshot)
+    if not Drawing or not mirrorVisible then mirrorClear(); return end
+    local state = {}
+    for token, square in pairs(snapshot or {}) do state[#state+1] = tostring(square) .. tostring(pieceTypes[token] or "") end
+    table.sort(state)
+    local key = table.concat(state, "|") .. tostring(mirrorX) .. tostring(mirrorY) .. tostring(mirrorSize)
+    if key == mirrorLastKey then return end
+    mirrorLastKey = key
+    mirrorClear()
+    local cell = mirrorSize / 8
+    mirrorAdd("Square", {Position=Vector2.new(mirrorX-4,mirrorY-38),Size=Vector2.new(mirrorSize+8,mirrorSize+44),Color=Color3.fromRGB(16,20,29),Filled=true,Visible=true,ZIndex=20})
+    mirrorAdd("Text", {Text="Live Position Mirror",Position=Vector2.new(mirrorX+10,mirrorY-27),Size=16,Color=Color3.fromRGB(240,244,250),Outline=true,Visible=true,ZIndex=42})
+    for rank=8,1,-1 do for file=1,8 do
+        local square=string.char(96+file)..rank; local px=mirrorX+(file-1)*cell; local py=mirrorY+(8-rank)*cell
+        mirrorAdd("Square",{Position=Vector2.new(px,py),Size=Vector2.new(cell,cell),Color=((file+rank)%2==0) and Color3.fromRGB(224,232,242) or Color3.fromRGB(91,123,153),Filled=true,Visible=true,ZIndex=30})
+    end end
+    for token,square in pairs(snapshot or {}) do
+        local piece=pieceTypes[token]; local file,rank=square:match("^([a-h])([1-8])$")
+        if piece and file and rank then
+            local px=mirrorX+(string.byte(file)-97)*cell+cell/2; local py=mirrorY+(8-tonumber(rank))*cell+cell/2-14
+            mirrorAdd("Text",{Text=mirrorChars[piece:sub(7)] or "?",Position=Vector2.new(px,py),Size=30,Center=true,Color=piece:sub(1,5)=="White" and Color3.fromRGB(250,250,250) or Color3.fromRGB(20,22,28),Outline=true,Visible=true,ZIndex=42})
+        end
+    end
+    mirrorAdd("Text",{Text="F8 hide/show | live detector state",Position=Vector2.new(mirrorX,mirrorY+mirrorSize+8),Size=12,Color=Color3.fromRGB(205,215,230),Outline=true,Visible=true,ZIndex=42})
+end
+local function mirrorStep(snapshot)
+    local down=false; pcall(function() down=game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.F8) end)
+    if down and not mirrorKeyDown then mirrorVisible=not mirrorVisible; mirrorLastKey=nil end
+    mirrorKeyDown=down
+    local now=tick()
+    if now >= mirrorNextDraw then
+        mirrorNextDraw=now+0.15
+        mirrorDraw(snapshot)
+    end
+end
+
 local whiteToMove = startedAfterOpening and (PLAY_AS == "White") or (not startedAfterOpening)
 local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
+local lastAnalysisFen = nil
+local lastAnalysisAt = 0
 local initialAnalysisEarliest = tick() + 0.75
 local stockfishOnline = true
 local previousWasStartingPosition = false
@@ -996,6 +1098,8 @@ local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
     pendingPromotion = nil
     positionCounts = {}
     lastPlayedUci = nil
+    lastRepetitionWarningKey = nil
+    lastRepetitionWarningCount = 0
     removeArrow()
 end
 
@@ -1045,6 +1149,7 @@ local function recommend(snapshot)
     local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     local result, errorMessage = bestMove(fen, snapshot)
     if not result or not result.bestmove then
+        print("[DBG] REJECT|fen=" .. tostring(fen) .. "|t=" .. (whiteToMove and "w" or "b") .. "|cr=" .. tostring(castlingRights) .. "|ep=" .. tostring(enPassantTarget) .. "|err=" .. tostring(errorMessage))
         updateStockfishStatus(false, errorMessage)
         print("[Chess Detect] " .. describeAnalysisError(errorMessage))
         analysisRetryAt = tick() + 2
@@ -1069,7 +1174,7 @@ local function recommend(snapshot)
     removeArrow()
     local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
     showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
-    if SECOND_MOVE_ENABLED and result.alternative then
+    if SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
         local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
         showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
@@ -1281,6 +1386,17 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     pieceTypes[token] = nil
                 end
             end
+            if #moved > 1 then
+                previous = confirmed
+                if PLAY_AS == "White" then
+                    whiteToMove = true
+                elseif PLAY_AS == "Black" then
+                    whiteToMove = false
+                end
+                initialAnalysisPending = true
+                analysisRetryAt = 0
+                moved = {}
+            end
             local promotionWasDetected = false
             if #moved == 0 and #added == 1 then
                 local promoted = added[1]
@@ -1344,6 +1460,11 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         end
                     end
                 end
+                if move.piece == "White King" and move.from == "e1" and (move.to == "g1" or move.to == "c1") then
+                    castled = true
+                elseif move.piece == "Black King" and move.from == "e8" and (move.to == "g8" or move.to == "c8") then
+                    castled = true
+                end
                 local wasPawn = move.piece and (move.piece:find("Pawn") ~= nil or promotionWasDetected)
                 if wasPawn then
                     local destinationRank = tonumber(move.to:sub(2, 2))
@@ -1383,9 +1504,15 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     fullmove = fullmove + 1
                 end
                 lastPlayedUci = playedUci
-                local repetitionCount = recordPosition(confirmed)
-                if repetitionCount >= 2 then
-                    print("[Chess] Repetition warning: current position occurred " .. tostring(repetitionCount) .. " times")
+                local repetitionCount, repetitionKey = recordPosition(confirmed)
+                if repetitionCount >= 2 and (repetitionKey ~= lastRepetitionWarningKey or repetitionCount ~= lastRepetitionWarningCount) then
+                    lastRepetitionWarningKey = repetitionKey
+                    lastRepetitionWarningCount = repetitionCount
+                    if repetitionCount >= 3 then
+                        print("[Chess] Threefold repetition detected; avoiding the previous move")
+                    else
+                        print("[Chess] Repetition detected; position seen twice")
+                    end
                 end
                 local yourTurn = PLAY_AS == "Any"
                     or (PLAY_AS == "White" and whiteToMove)
@@ -1396,7 +1523,17 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     if ready then
                         local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
                         local avoidMoves = repetitionCount >= 2 and lastPlayedUci and {lastPlayedUci} or nil
-                        result, errorMessage = bestMove(fen, confirmed, avoidMoves)
+                        if fen == lastAnalysisFen and tick() - lastAnalysisAt < 3 then
+                            result = nil
+                        else
+                            lastAnalysisFen = fen
+                            lastAnalysisAt = tick()
+                            result, errorMessage = bestMove(fen, confirmed, avoidMoves)
+                            if result and result.bestmove then
+                            else
+                            end
+                        end
+                    else
                     end
                     if result then
                         local fresh, latest = pcall(scan)
@@ -1422,7 +1559,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         removeArrow()
                         local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
                         showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
-                        if SECOND_MOVE_ENABLED and result.alternative then
+                        if SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
                             local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
                             showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
@@ -1441,4 +1578,5 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         end
     end
 end
+
 
