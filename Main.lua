@@ -999,6 +999,8 @@ local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
     removeArrow()
 end
 
+local describeAnalysisError
+
 local function updateStockfishStatus(online, detail)
     if online == stockfishOnline then
         return
@@ -1017,7 +1019,7 @@ local function updateStockfishStatus(online, detail)
     end
 end
 
-local function describeAnalysisError(errorMessage)
+describeAnalysisError = function(errorMessage)
     local message = tostring(errorMessage or "No best move returned")
     local lower = string.lower(message)
     if string.find(lower, "no legal moves") or string.find(lower, "no best move") then
@@ -1072,8 +1074,9 @@ local function recommend(snapshot)
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
         showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
     end
+    local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
     local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
-    print("[Stockfish " .. backend .. "] " .. message)
+    print("[" .. engineName .. " " .. backend .. "] " .. message)
     return true
 end
 
@@ -1424,8 +1427,9 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
                             showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
                         end
+                        local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
                         local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
-                        print("[Stockfish " .. backend .. "] " .. message)
+                        print("[" .. engineName .. " " .. backend .. "] " .. message)
                     elseif errorMessage then
                         updateStockfishStatus(false, errorMessage)
                         print("[Chess Detect] " .. describeAnalysisError(errorMessage))
