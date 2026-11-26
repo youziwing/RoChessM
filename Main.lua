@@ -22,6 +22,7 @@ local ENGINE = "stockfish"
 local SECOND_MOVE_ENABLED = true
 local MAX_STOCKFISH = false
 local SHOW_OUT_OF_TURN = false
+local ANALYSIS_TIME_MODE = "superfast"
 local analysisRefreshRequested = false
 local maxStockfishStartupReset = true
 local maxStockfishConfigCleaned = false
@@ -30,6 +31,7 @@ local OPENING_NAME = "Automatic"
 local openingActive = false
 local moveHistory = {}
 local positionCounts = {}
+local repetitionMoves = {}
 local lastPlayedUci = nil
 local lastRepetitionWarningKey = nil
 local lastRepetitionWarningCount = 0
@@ -114,7 +116,8 @@ local function removeArrow()
     arrows = {}
 end
 
-local function showArrow(fromSquare, toSquare, color, labelText)
+local function showArrow(fromSquare, toSquare, color, labelText, zIndex)
+    zIndex = zIndex or 900
     local function liveCenter(name)
         local square = boardSquareObjects[name]
         if square then
@@ -146,13 +149,13 @@ local function showArrow(fromSquare, toSquare, color, labelText)
     arrowLine.To = Vector2.new(toPoint.X - ux * 8, toPoint.Y - uy * 8)
     arrowLine.Color = color
     arrowLine.Thickness = 4
-    pcall(function() arrowLine.ZIndex = 900 end)
+    pcall(function() arrowLine.ZIndex = zIndex end)
     arrowLine.Visible = true
     local arrowHead = Drawing.new("Triangle")
     arrowHead.PointA, arrowHead.PointB, arrowHead.PointC = tip, left, right
     arrowHead.Color = color
     arrowHead.Filled = true
-    pcall(function() arrowHead.ZIndex = 901 end)
+    pcall(function() arrowHead.ZIndex = zIndex + 1 end)
     arrowHead.Visible = true
     local label
     if labelText and labelText ~= "" then
@@ -164,7 +167,7 @@ local function showArrow(fromSquare, toSquare, color, labelText)
         label.Outline = true
         label.Color = Color3.fromRGB(255, 245, 80)
         pcall(function() label.Font = 2 end)
-        pcall(function() label.ZIndex = 100 end)
+        pcall(function() label.ZIndex = zIndex + 2 end)
         label.Visible = true
     end
     arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead, Label = label}
@@ -377,17 +380,6 @@ local function setupInterfaceChoice()
     actions:AddButton({Title="Use Matcha UI next launch", ButtonText="Switch", Callback=function()
         pcall(function() writefile(CUSTOM_UI_CHOICE_FILE, HttpService:JSONEncode({choice="matcha"})) end)
         pcall(function() jdui:Notify({Title="Saved", Content="Matcha UI will open next launch.", Type="success", Duration=4}) end)
-    end})
-    local position = gameTab:AddIsland({Title="Position Import", Description="Load a FEN position"})
-    position:AddTextbox({Title="FEN", Placeholder="Paste a FEN position", Default="", Callback=function(value) enteredFen=value or "" end})
-    position:AddButton({Title="Import position", ButtonText="Import", Callback=function()
-        if enteredFen and enteredFen ~= "" then
-            pendingFen = enteredFen
-            newGameRequested = true
-            print("[Chess] FEN import requested")
-        else
-            print("[Chess] FEN import failed: paste a FEN first")
-        end
     end})
     jdui.Tabs = {main}
     pcall(function() jdui:SetConfig("rochess") end)
@@ -604,26 +596,6 @@ if not useCustomUI and UI and UI.AddTab then
             pcall(function() writefile(CUSTOM_UI_CHOICE_FILE, HttpService:JSONEncode({choice="custom"})) end)
             print("[Chess Detect] RoChess UI saved for next launch")
         end)
-        local position = tab:Section("Position Import", "Right")
-        local fenInput = position:InputText("chess_fen", "FEN position", "", function(text)
-            enteredFen = text or ""
-        end)
-        position:Button("Import Position", function()
-            local text = enteredFen
-            local widgetOk, widgetText = pcall(function() return fenInput:GetValue() end)
-            if widgetOk and widgetText and widgetText ~= "" then text = widgetText end
-            local uiText = UI.GetValue("chess_fen")
-            if uiText and uiText ~= "" then text = uiText end
-            if text and text ~= "" then
-                text = text:gsub("^%s+", ""):gsub("%s+$", "")
-                enteredFen = text
-                pendingFen = text
-                importStatus = "Position queued"
-            else
-                importStatus = "Paste a FEN first"
-            end
-        end)
-        position:Text(importStatus)
     end)
 end
 
@@ -988,7 +960,7 @@ local function positionReady(snapshot)
     return true
 end
 local function askStockfish(fen, avoidMoves)
-    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, max_stockfish=MAX_STOCKFISH}
+    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, max_stockfish=MAX_STOCKFISH, analysis_time=ANALYSIS_TIME_MODE == "superfast" and 0.1 or nil}
     if SECOND_MOVE_ENABLED then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
@@ -1169,6 +1141,7 @@ local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
     pendingFen = nil
     pendingPromotion = nil
     positionCounts = {}
+    repetitionMoves = {}
     lastPlayedUci = nil
     lastRepetitionWarningKey = nil
     lastRepetitionWarningCount = 0
@@ -1260,11 +1233,11 @@ local function recommend(snapshot)
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
     local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-    showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
+    showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel, 1000)
     if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
         local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
-        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
+        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel, 800)
     end
     local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
     local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
@@ -1647,12 +1620,16 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     fullmove = fullmove + 1
                 end
                 lastPlayedUci = playedUci
+                local sourceFen = makeFen(previous, pieceTypes, not whiteToMove, halfmove, fullmove)
+                local sourceKey = positionKey(sourceFen)
+                repetitionMoves[sourceKey] = repetitionMoves[sourceKey] or {}
+                repetitionMoves[sourceKey][playedUci] = true
                 local repetitionCount, repetitionKey = recordPosition(confirmed)
                 if repetitionCount >= 2 and (repetitionKey ~= lastRepetitionWarningKey or repetitionCount ~= lastRepetitionWarningCount) then
                     lastRepetitionWarningKey = repetitionKey
                     lastRepetitionWarningCount = repetitionCount
                     if repetitionCount >= 3 then
-                        print("[Chess] Threefold repetition detected; avoiding the previous move")
+                        print("[Chess] Threefold repetition detected; avoiding moves that repeat this position")
                     else
                         print("[Chess] Repetition detected; position seen twice")
                     end
@@ -1666,7 +1643,14 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     if ready then
                         local fen = makeFen(confirmed, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
                         local premove = isPremovePosition(whiteToMove)
-                        local avoidMoves = repetitionCount >= 2 and lastPlayedUci and {lastPlayedUci} or nil
+                        local avoidMoves
+                        local repeatedMoves = repetitionMoves[repetitionKey]
+                        if repetitionCount >= 2 and repeatedMoves then
+                            avoidMoves = {}
+                            for uci in pairs(repeatedMoves) do
+                                avoidMoves[#avoidMoves + 1] = uci
+                            end
+                        end
                         if fen == lastAnalysisFen and tick() - lastAnalysisAt < 3 then
                             result = nil
                         else
@@ -1702,11 +1686,11 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
                         local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-                        showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
+                        showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel, 1000)
                         if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
                             local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
-                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
+                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel, 800)
                         end
                         local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
                         local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
