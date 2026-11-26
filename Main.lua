@@ -20,6 +20,11 @@ local STRENGTH = "high"
 local PLAY_STYLE = "standard"
 local ENGINE = "stockfish"
 local SECOND_MOVE_ENABLED = true
+local MAX_STOCKFISH = false
+local SHOW_OUT_OF_TURN = false
+local analysisRefreshRequested = false
+local maxStockfishStartupReset = true
+local maxStockfishConfigCleaned = false
 local TARGET_ELO = nil
 local OPENING_NAME = "Automatic"
 local openingActive = false
@@ -48,6 +53,25 @@ local boardCenters = {}
 local boardSquareObjects = {}
 local arrows = {}
 local applyPlayAs
+
+local function sideForAnalysis(actualWhiteToMove)
+    if SHOW_OUT_OF_TURN and (PLAY_AS == "White" or PLAY_AS == "Black") then
+        return PLAY_AS == "White"
+    end
+    return actualWhiteToMove
+end
+
+local function isPremovePosition(actualWhiteToMove)
+    return SHOW_OUT_OF_TURN
+        and (PLAY_AS == "White" or PLAY_AS == "Black")
+        and (PLAY_AS == "White") ~= actualWhiteToMove
+end
+
+local function primaryArrowColor(actualWhiteToMove)
+    return isPremovePosition(actualWhiteToMove)
+        and Color3.fromRGB(255, 215, 40)
+        or Color3.fromRGB(40, 220, 80)
+end
 local pendingFen = nil
 local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
@@ -237,6 +261,19 @@ local function updateVisualCalibration()
 end
 
 local RoChessUI
+local function clearMaxStockfishConfig()
+    if maxStockfishConfigCleaned then return end
+    maxStockfishConfigCleaned = true
+    pcall(function()
+        local configPath = "rochess.json"
+        if not isfile(configPath) then return end
+        local saved = HttpService:JSONDecode(readfile(configPath))
+        if type(saved) ~= "table" then return end
+        saved["RoChess/Game settings/Max Stockfish (slower)"] = nil
+        writefile(configPath, HttpService:JSONEncode(saved))
+    end)
+end
+
 local function setupInterfaceChoice()
     local savedChoice
     pcall(function()
@@ -320,6 +357,14 @@ local function setupInterfaceChoice()
         OPENING_NAME=value; openingActive=value~="Automatic"; moveHistory={}; openingRefreshRequested=true; newGameRequested=true; removeArrow()
     end})
     game:AddToggle({Title="Second best move", Default=SECOND_MOVE_ENABLED, Callback=function(value) SECOND_MOVE_ENABLED=value end})
+    game:AddToggle({Title="Max Stockfish (slower)", Default=MAX_STOCKFISH, Callback=function(value)
+        if maxStockfishStartupReset then return end
+        MAX_STOCKFISH = value
+    end})
+    game:AddToggle({Title="Premove", Default=SHOW_OUT_OF_TURN, Callback=function(value)
+        SHOW_OUT_OF_TURN = value
+        analysisRefreshRequested = true
+    end})
     local actions = gameTab:AddIsland({Title="Actions", Description="Game and position controls"})
     actions:AddButton({Title="New Game", ButtonText="Reset", Callback=function()
         newGameRequested = true
@@ -475,6 +520,8 @@ do
     end
 end
 
+-- Max Stockfish is runtime-only; remove any persisted UI value before JDUI loads.
+clearMaxStockfishConfig()
 setupInterfaceChoice()
 
 if not useCustomUI and UI and UI.AddTab then
@@ -495,6 +542,14 @@ if not useCustomUI and UI and UI.AddTab then
         end)
         settings:Combo("chess_second_move", "Second best move", {"Off", "On"}, 1, function(_, text)
             SECOND_MOVE_ENABLED = text == "On"
+        end)
+        settings:Combo("chess_max_stockfish", "Max Stockfish (depth 21)", {"Off", "On"}, 0, function(_, text)
+            if maxStockfishStartupReset then return end
+            MAX_STOCKFISH = text == "On"
+        end)
+        settings:Combo("chess_premove", "Premove", {"Off", "On"}, 0, function(_, text)
+            SHOW_OUT_OF_TURN = text == "On"
+            analysisRefreshRequested = true
         end)
         settings:Combo("chess_opening", "Opening", {"Automatic", "Italian Game", "Sicilian Defense", "French Defense", "Caro-Kann Defense", "Alien Gambit", "Queen's Gambit", "King's Indian Defense", "English Opening"}, 0, function(_, text)
             OPENING_NAME = text
@@ -690,7 +745,13 @@ end
 local cachedSquareFolder, cachedPieceFolder
 local function getBoard(forceRefresh)
     if not forceRefresh and cachedSquareFolder and cachedPieceFolder then
-        return cachedSquareFolder, cachedPieceFolder
+        local cachedOk = pcall(function()
+            return cachedSquareFolder:GetChildren(), cachedPieceFolder:GetChildren()
+        end)
+        if cachedOk then
+            return cachedSquareFolder, cachedPieceFolder
+        end
+        cachedSquareFolder, cachedPieceFolder = nil, nil
     end
     local gui = child(player, "PlayerGui")
     for _ = 1, 80 do
@@ -768,6 +829,9 @@ end
 
 local function scan()
     local squareFolder, pieceFolder = getBoard()
+    if not squareFolder or not pieceFolder then
+        error("Chess board not found. Open RoChess first.")
+    end
     local squares, byIndex = {}, {}
     for _, square in ipairs(squareFolder:GetChildren()) do
         local index = tonumber(square.Name:match("^S(%d+)$"))
@@ -924,7 +988,7 @@ local function positionReady(snapshot)
     return true
 end
 local function askStockfish(fen, avoidMoves)
-    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE}
+    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, max_stockfish=MAX_STOCKFISH}
     if SECOND_MOVE_ENABLED then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
@@ -938,6 +1002,14 @@ local function askStockfish(fen, avoidMoves)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
+end
+
+local function flipFenTurn(fen)
+    local fields = {}
+    for field in tostring(fen):gmatch("%S+") do fields[#fields + 1] = field end
+    if #fields < 2 then return nil end
+    fields[2] = fields[2] == "w" and "b" or "w"
+    return table.concat(fields, " ")
 end
 
 local function bestMove(fen, snapshot, avoidMoves)
@@ -1146,8 +1218,23 @@ local function recommend(snapshot)
         analysisRetryAt = tick() + 0.35
         return false
     end
-    local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
+    local fen = makeFen(snapshot, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
+    local premove = isPremovePosition(whiteToMove)
     local result, errorMessage = bestMove(fen, snapshot)
+    if (not result or not result.bestmove) and tostring(errorMessage):lower():find("illegal") then
+        local alternateFen = flipFenTurn(fen)
+        if alternateFen then
+            local alternateResult, alternateError = bestMove(alternateFen, snapshot)
+            if alternateResult and alternateResult.bestmove then
+                whiteToMove = not whiteToMove
+                fen = alternateFen
+                result, errorMessage = alternateResult, nil
+                print("[DBG] TURN corrected after illegal-FEN retry|t=" .. (whiteToMove and "w" or "b"))
+            else
+                errorMessage = alternateError or errorMessage
+            end
+        end
+    end
     if not result or not result.bestmove then
         print("[DBG] REJECT|fen=" .. tostring(fen) .. "|t=" .. (whiteToMove and "w" or "b") .. "|cr=" .. tostring(castlingRights) .. "|ep=" .. tostring(enPassantTarget) .. "|err=" .. tostring(errorMessage))
         updateStockfishStatus(false, errorMessage)
@@ -1173,8 +1260,8 @@ local function recommend(snapshot)
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
     local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
-    if SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
+    showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
+    if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
         local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
         showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
@@ -1206,6 +1293,13 @@ end
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
     if customUI and useCustomUI then customUI:step() end
+    if maxStockfishStartupReset then
+        -- Matcha may restore the previous combo selection during the first UI
+        -- step. Apply the per-execution default after that restoration occurs.
+        MAX_STOCKFISH = false
+        maxStockfishStartupReset = false
+        clearMaxStockfishConfig()
+    end
     if not useCustomUI and UI and UI.GetValue then
         local selected = selectedPlayAs(UI.GetValue("chess_play_as"))
         if selected and lastPlayAsSelection == nil then
@@ -1222,6 +1316,13 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             AUTO_DETECT_COLOR = false
             applyPlayAs(selected)
         end
+    end
+    if analysisRefreshRequested then
+        removeArrow()
+        initialAnalysisPending = true
+        analysisRetryAt = 0
+        initialAnalysisEarliest = tick()
+        analysisRefreshRequested = false
     end
     if AUTO_DETECT_COLOR then
         local detected = detectPlayAs()
@@ -1355,7 +1456,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         continue
     end
     if initialAnalysisPending then
-        local shouldAnalyze = PLAY_AS == "Any"
+        local shouldAnalyze = SHOW_OUT_OF_TURN or PLAY_AS == "Any"
             or (PLAY_AS == "White" and whiteToMove)
             or (PLAY_AS == "Black" and not whiteToMove)
         if shouldAnalyze then
@@ -1556,14 +1657,15 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         print("[Chess] Repetition detected; position seen twice")
                     end
                 end
-                local yourTurn = PLAY_AS == "Any"
+                local yourTurn = SHOW_OUT_OF_TURN or PLAY_AS == "Any"
                     or (PLAY_AS == "White" and whiteToMove)
                     or (PLAY_AS == "Black" and not whiteToMove)
                 if yourTurn then
                     local ready = positionReady(confirmed)
                     local result, errorMessage
                     if ready then
-                        local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
+                        local fen = makeFen(confirmed, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
+                        local premove = isPremovePosition(whiteToMove)
                         local avoidMoves = repetitionCount >= 2 and lastPlayedUci and {lastPlayedUci} or nil
                         if fen == lastAnalysisFen and tick() - lastAnalysisAt < 3 then
                             result = nil
@@ -1600,8 +1702,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
                         local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
-                        if SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
+                        showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
+                        if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
                             local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
                             showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
