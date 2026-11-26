@@ -1023,7 +1023,7 @@ describeAnalysisError = function(errorMessage)
     local message = tostring(errorMessage or "No best move returned")
     local lower = string.lower(message)
     if string.find(lower, "no legal moves") or string.find(lower, "no best move") then
-        return "No legal move: the game may be over or the detected board is incomplete"
+        return "Game over: no legal moves"
     elseif string.find(lower, "illegal position") or string.find(lower, "invalid fen") then
         return "Invalid board position: the detected pieces do not form a legal chess position"
     elseif string.find(lower, "timed out") or string.find(lower, "timeout") then
