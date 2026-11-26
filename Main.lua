@@ -20,10 +20,6 @@ local STRENGTH = "high"
 local PLAY_STYLE = "standard"
 local ENGINE = "stockfish"
 local SECOND_MOVE_ENABLED = true
-local SHOW_OUT_OF_TURN = false
-local MAX_STOCKFISH = false
-local ANALYSIS_CACHE_LIMIT = 48
-local analysisCache = {}
 local TARGET_ELO = nil
 local OPENING_NAME = "Automatic"
 local openingActive = false
@@ -52,26 +48,6 @@ local boardCenters = {}
 local boardSquareObjects = {}
 local arrows = {}
 local applyPlayAs
-
-local function sideForAnalysis(actualWhiteToMove)
-    if SHOW_OUT_OF_TURN and (PLAY_AS == "White" or PLAY_AS == "Black") then
-        return PLAY_AS == "White"
-    end
-    return actualWhiteToMove
-end
-
-local function primaryArrowColor(actualWhiteToMove)
-    local premove = SHOW_OUT_OF_TURN
-        and (PLAY_AS == "White" or PLAY_AS == "Black")
-        and (PLAY_AS == "White") ~= actualWhiteToMove
-    return premove and Color3.fromRGB(255, 215, 40) or Color3.fromRGB(40, 220, 80)
-end
-
-local function isPremovePosition(actualWhiteToMove)
-    return SHOW_OUT_OF_TURN
-        and (PLAY_AS == "White" or PLAY_AS == "Black")
-        and (PLAY_AS == "White") ~= actualWhiteToMove
-end
 local pendingFen = nil
 local enteredFen = ""
 local importStatus = "Waiting for a FEN position"
@@ -344,13 +320,6 @@ local function setupInterfaceChoice()
         OPENING_NAME=value; openingActive=value~="Automatic"; moveHistory={}; openingRefreshRequested=true; newGameRequested=true; removeArrow()
     end})
     game:AddToggle({Title="Second best move", Default=SECOND_MOVE_ENABLED, Callback=function(value) SECOND_MOVE_ENABLED=value end})
-    game:AddToggle({Title="Max Stockfish (slower)", Default=MAX_STOCKFISH, Callback=function(value)
-        MAX_STOCKFISH = value
-        analysisCache = {}
-    end})
-    game:AddToggle({Title="Premove", Default=SHOW_OUT_OF_TURN, Callback=function(value)
-        SHOW_OUT_OF_TURN = value
-    end})
     local actions = gameTab:AddIsland({Title="Actions", Description="Game and position controls"})
     actions:AddButton({Title="New Game", ButtonText="Reset", Callback=function()
         newGameRequested = true
@@ -954,14 +923,9 @@ local function positionReady(snapshot)
     if whiteKing ~= 1 or blackKing ~= 1 then return false, "invalid king count" end
     return true
 end
-local function askStockfish(fen, avoidMoves, includeAlternative)
-    local cacheKey = tostring(fen) .. "|" .. tostring(avoidMoves and table.concat(avoidMoves, ",") or "") .. "|" .. tostring(STRENGTH) .. "|" .. tostring(PLAY_STYLE) .. "|" .. tostring(ENGINE) .. "|" .. tostring(TARGET_ELO) .. "|" .. tostring(includeAlternative) .. "|max=" .. tostring(MAX_STOCKFISH)
-    local cached = analysisCache[cacheKey]
-    if cached then
-        return cached
-    end
-    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, max_stockfish=MAX_STOCKFISH}
-    if includeAlternative then request.include_alternative = true end
+local function askStockfish(fen, avoidMoves)
+    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE}
+    if SECOND_MOVE_ENABLED then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
     local body = HttpService:JSONEncode(request)
@@ -973,23 +937,10 @@ local function askStockfish(fen, avoidMoves, includeAlternative)
     local ok, result = pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
-    local entryCount = 0
-    for _ in pairs(analysisCache) do entryCount = entryCount + 1 end
-    if entryCount >= ANALYSIS_CACHE_LIMIT then
-        local oldestKey, oldestAt
-        for key, entry in pairs(analysisCache) do
-            if not oldestAt or entry.cachedAt < oldestAt then
-                oldestKey, oldestAt = key, entry.cachedAt
-            end
-        end
-        if oldestKey then analysisCache[oldestKey] = nil end
-    end
-    result.cachedAt = tick()
-    analysisCache[cacheKey] = result
     return result
 end
 
-local function bestMove(fen, snapshot, avoidMoves, includeAlternative)
+local function bestMove(fen, snapshot, avoidMoves)
     if openingActive and OPENING_NAME ~= "Automatic" then
         local line = openingLines[OPENING_NAME]
         local forced = line and line[#moveHistory + 1]
@@ -997,7 +948,7 @@ local function bestMove(fen, snapshot, avoidMoves, includeAlternative)
             return {bestmove=forced, backend="opening"}
         end
     end
-    return askStockfish(fen, avoidMoves, includeAlternative)
+    return askStockfish(fen, avoidMoves)
 end
 
 local function checkAnnouncement()
@@ -1195,9 +1146,8 @@ local function recommend(snapshot)
         analysisRetryAt = tick() + 0.35
         return false
     end
-    local fen = makeFen(snapshot, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
-    local premove = isPremovePosition(whiteToMove)
-    local result, errorMessage = bestMove(fen, snapshot, nil, SECOND_MOVE_ENABLED and not premove)
+    local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
+    local result, errorMessage = bestMove(fen, snapshot)
     if not result or not result.bestmove then
         print("[DBG] REJECT|fen=" .. tostring(fen) .. "|t=" .. (whiteToMove and "w" or "b") .. "|cr=" .. tostring(castlingRights) .. "|ep=" .. tostring(enPassantTarget) .. "|err=" .. tostring(errorMessage))
         updateStockfishStatus(false, errorMessage)
@@ -1223,8 +1173,8 @@ local function recommend(snapshot)
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
     local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-    showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
-    if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
+    showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
+    if SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
         local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
         showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
@@ -1405,7 +1355,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         continue
     end
     if initialAnalysisPending then
-        local shouldAnalyze = SHOW_OUT_OF_TURN or PLAY_AS == "Any"
+        local shouldAnalyze = PLAY_AS == "Any"
             or (PLAY_AS == "White" and whiteToMove)
             or (PLAY_AS == "Black" and not whiteToMove)
         if shouldAnalyze then
@@ -1417,9 +1367,6 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         end
     end
     if success and not sameSnapshot(previous, current) then
-        -- Invalidate immediately; a fast opponent premove must not leave an
-        -- arrow from the previous position visible during settling.
-        removeArrow()
         local stable, confirmed = settleSnapshot(current)
         if stable then
             local moved, capture = {}, false
@@ -1438,6 +1385,33 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     removed[#removed + 1] = {token=token, from=previous[token], piece=pieceTypes[token]}
                     pieceTypes[token] = nil
                 end
+            end
+            -- Castling can be rendered in two frames: the king moves first,
+            -- then the rook. Do not process the intermediate king-only frame
+            -- as a complete turn, or the rook frame will toggle the turn back.
+            local castleStillAnimating = false
+            for _, candidate in ipairs(moved) do
+                local isWhiteCastle = candidate.piece == "White King" and candidate.from == "e1" and (candidate.to == "g1" or candidate.to == "c1")
+                local isBlackCastle = candidate.piece == "Black King" and candidate.from == "e8" and (candidate.to == "g8" or candidate.to == "c8")
+                if isWhiteCastle or isBlackCastle then
+                    local rookFrom, rookTo
+                    if candidate.to == "g1" then rookFrom, rookTo = "h1", "f1"
+                    elseif candidate.to == "c1" then rookFrom, rookTo = "a1", "d1"
+                    elseif candidate.to == "g8" then rookFrom, rookTo = "h8", "f8"
+                    else rookFrom, rookTo = "a8", "d8" end
+                    local rookArrived = false
+                    for token, square in pairs(confirmed) do
+                        if square == rookTo and pieceTypes[token] and pieceTypes[token]:sub(7) == "Rook" then
+                            rookArrived = true
+                            break
+                        end
+                    end
+                    if not rookArrived then castleStillAnimating = true end
+                end
+            end
+            if castleStillAnimating then
+                wait(SETTLE_DELAY)
+                continue
             end
             local promotionCandidate = (#added == 1)
             if promotionCandidate then
@@ -1582,22 +1556,21 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         print("[Chess] Repetition detected; position seen twice")
                     end
                 end
-                local yourTurn = SHOW_OUT_OF_TURN or PLAY_AS == "Any"
+                local yourTurn = PLAY_AS == "Any"
                     or (PLAY_AS == "White" and whiteToMove)
                     or (PLAY_AS == "Black" and not whiteToMove)
                 if yourTurn then
                     local ready = positionReady(confirmed)
                     local result, errorMessage
                     if ready then
-                        local fen = makeFen(confirmed, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
-                        local premove = isPremovePosition(whiteToMove)
+                        local fen = makeFen(confirmed, pieceTypes, whiteToMove, halfmove, fullmove)
                         local avoidMoves = repetitionCount >= 2 and lastPlayedUci and {lastPlayedUci} or nil
                         if fen == lastAnalysisFen and tick() - lastAnalysisAt < 3 then
                             result = nil
                         else
                             lastAnalysisFen = fen
                             lastAnalysisAt = tick()
-                            result, errorMessage = bestMove(fen, confirmed, avoidMoves, SECOND_MOVE_ENABLED and not premove)
+                            result, errorMessage = bestMove(fen, confirmed, avoidMoves)
                             if result and result.bestmove then
                             else
                             end
@@ -1627,8 +1600,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
                         local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-                        showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
-                        if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
+                        showArrow(fromSquare, toSquare, Color3.fromRGB(40, 220, 80), promotionLabel)
+                        if SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
                             local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
                             showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
