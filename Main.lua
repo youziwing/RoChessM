@@ -21,6 +21,7 @@ local PLAY_STYLE = "standard"
 local ENGINE = "stockfish"
 local SECOND_MOVE_ENABLED = true
 local SHOW_OUT_OF_TURN = false
+local MAX_STOCKFISH = false
 local ANALYSIS_CACHE_LIMIT = 48
 local analysisCache = {}
 local TARGET_ELO = nil
@@ -343,6 +344,10 @@ local function setupInterfaceChoice()
         OPENING_NAME=value; openingActive=value~="Automatic"; moveHistory={}; openingRefreshRequested=true; newGameRequested=true; removeArrow()
     end})
     game:AddToggle({Title="Second best move", Default=SECOND_MOVE_ENABLED, Callback=function(value) SECOND_MOVE_ENABLED=value end})
+    game:AddToggle({Title="Max Stockfish (slower)", Default=MAX_STOCKFISH, Callback=function(value)
+        MAX_STOCKFISH = value
+        analysisCache = {}
+    end})
     game:AddToggle({Title="Premove", Default=SHOW_OUT_OF_TURN, Callback=function(value)
         SHOW_OUT_OF_TURN = value
     end})
@@ -950,12 +955,12 @@ local function positionReady(snapshot)
     return true
 end
 local function askStockfish(fen, avoidMoves, includeAlternative)
-    local cacheKey = tostring(fen) .. "|" .. tostring(avoidMoves and table.concat(avoidMoves, ",") or "") .. "|" .. tostring(STRENGTH) .. "|" .. tostring(PLAY_STYLE) .. "|" .. tostring(ENGINE) .. "|" .. tostring(TARGET_ELO) .. "|" .. tostring(includeAlternative)
+    local cacheKey = tostring(fen) .. "|" .. tostring(avoidMoves and table.concat(avoidMoves, ",") or "") .. "|" .. tostring(STRENGTH) .. "|" .. tostring(PLAY_STYLE) .. "|" .. tostring(ENGINE) .. "|" .. tostring(TARGET_ELO) .. "|" .. tostring(includeAlternative) .. "|max=" .. tostring(MAX_STOCKFISH)
     local cached = analysisCache[cacheKey]
     if cached then
         return cached
     end
-    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE}
+    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, max_stockfish=MAX_STOCKFISH}
     if includeAlternative then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
