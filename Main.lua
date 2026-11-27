@@ -8,9 +8,10 @@ _G.__ROCHESS_SESSION = ROCHESS_SESSION
 local DEVICE_ID = "anonymous"
 pcall(function() DEVICE_ID = tostring(gethwid()) end)
 if DEVICE_ID == "" or DEVICE_ID == "nil" then DEVICE_ID = "anonymous" end
-local SCAN_DELAY = 0.08
+local SCAN_DELAY = 0.04
+local COLOR_DETECT_INTERVAL = 1.0
 local SETTLE_DELAY = 0.025
-local SETTLE_STABLE_SCANS = 2
+local SETTLE_STABLE_SCANS = 3
 local API_URL = "https://rochess-gateway-seven.vercel.app/api/analyze"
 local STATUS_URL = "https://rochess-gateway-seven.vercel.app/api/health"
 local STATUS_INTERVAL = 10
@@ -22,17 +23,15 @@ local ENGINE = "stockfish"
 local SECOND_MOVE_ENABLED = true
 local MAX_STOCKFISH = false
 local SHOW_OUT_OF_TURN = false
-local ANALYSIS_TIME_MODE = "superfast"
 local analysisRefreshRequested = false
-local maxStockfishStartupReset = true
-local maxStockfishConfigCleaned = false
 local TARGET_ELO = nil
 local OPENING_NAME = "Automatic"
 local openingActive = false
 local moveHistory = {}
 local positionCounts = {}
-local repetitionMoves = {}
 local lastPlayedUci = nil
+local lastProcessedMoveUci = nil
+local lastProcessedMoveAt = 0
 local lastRepetitionWarningKey = nil
 local lastRepetitionWarningCount = 0
 local openingRefreshRequested = false
@@ -47,36 +46,17 @@ local openingLines = {
     ["English Opening"] = {"c2c4", "e7e5", "b1c3", "g8f6"},
 }
 local PLAY_AS = "White" -- "White" or "Black"
+local playAsUiReady = false
 -- Auto-detect is the startup behavior; the UI intentionally exposes only
 -- White and Black. Changing the combo switches to a manual override.
 local AUTO_DETECT_COLOR = true
 local lastPlayAsSelection = nil
+local lastColorDetectAt = 0
 local boardCenters = {}
 local boardSquareObjects = {}
+local cachedSpacing
 local arrows = {}
 local applyPlayAs
-
-local function sideForAnalysis(actualWhiteToMove)
-    if SHOW_OUT_OF_TURN and (PLAY_AS == "White" or PLAY_AS == "Black") then
-        return PLAY_AS == "White"
-    end
-    return actualWhiteToMove
-end
-
-local function isPremovePosition(actualWhiteToMove)
-    return SHOW_OUT_OF_TURN
-        and (PLAY_AS == "White" or PLAY_AS == "Black")
-        and (PLAY_AS == "White") ~= actualWhiteToMove
-end
-
-local function primaryArrowColor(actualWhiteToMove)
-    return isPremovePosition(actualWhiteToMove)
-        and Color3.fromRGB(255, 215, 40)
-        or Color3.fromRGB(40, 220, 80)
-end
-local pendingFen = nil
-local enteredFen = ""
-local importStatus = "Waiting for a FEN position"
 local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
 local lastStatusCheck = 0
@@ -109,15 +89,51 @@ end)
 
 local function removeArrow()
     for _, arrow in ipairs(arrows) do
-        arrow.Line:Remove()
-        arrow.Head:Remove()
+        if arrow.Line then arrow.Line:Remove() end
+        if arrow.Head then arrow.Head:Remove() end
         if arrow.Label then arrow.Label:Remove() end
+        if arrow.OutlineFrom then arrow.OutlineFrom:Remove() end
+        if arrow.OutlineTo then arrow.OutlineTo:Remove() end
     end
     arrows = {}
 end
 
-local function showArrow(fromSquare, toSquare, color, labelText, zIndex)
-    zIndex = zIndex or 900
+local function showPrimaryTileOutlines(fromSquare, toSquare)
+    if not Drawing then return end
+    local function centerAndSize(name)
+        local center = boardCenters[name]
+        if not center or not cachedSpacing or cachedSpacing < 4 then return nil end
+        local scale = calibrationSquareScale or 1
+        local size = Vector2.new(cachedSpacing * scale, cachedSpacing * scale)
+        return Vector2.new(center.X + calibrationOffsetX, center.Y + calibrationOffsetY), size
+    end
+    local entries = {}
+    for _, name in ipairs({fromSquare, toSquare}) do
+        local center, size = centerAndSize(name)
+        if center and size then
+            local outline = Drawing.new("Square")
+            local border = 4
+            outline.Position = Vector2.new(center.X - size.X / 2 + border / 2, center.Y - size.Y / 2 + border / 2)
+            outline.Size = Vector2.new(size.X - border, size.Y - border)
+            outline.Color = Color3.fromRGB(80, 255, 105)
+            outline.Thickness = border
+            outline.Filled = false
+            pcall(function() outline.ZIndex = 1200 end)
+            outline.Visible = true
+            entries[#entries + 1] = outline
+        end
+    end
+    if #entries > 0 then
+        local item = arrows[#arrows]
+        if item then
+            item.OutlineFrom, item.OutlineTo = entries[1], entries[2]
+        else
+            for _, outline in ipairs(entries) do outline:Remove() end
+        end
+    end
+end
+
+local function showArrow(fromSquare, toSquare, color, labelText)
     local function liveCenter(name)
         local square = boardSquareObjects[name]
         if square then
@@ -149,13 +165,13 @@ local function showArrow(fromSquare, toSquare, color, labelText, zIndex)
     arrowLine.To = Vector2.new(toPoint.X - ux * 8, toPoint.Y - uy * 8)
     arrowLine.Color = color
     arrowLine.Thickness = 4
-    pcall(function() arrowLine.ZIndex = zIndex end)
+    pcall(function() arrowLine.ZIndex = 900 end)
     arrowLine.Visible = true
     local arrowHead = Drawing.new("Triangle")
     arrowHead.PointA, arrowHead.PointB, arrowHead.PointC = tip, left, right
     arrowHead.Color = color
     arrowHead.Filled = true
-    pcall(function() arrowHead.ZIndex = zIndex + 1 end)
+    pcall(function() arrowHead.ZIndex = 901 end)
     arrowHead.Visible = true
     local label
     if labelText and labelText ~= "" then
@@ -167,7 +183,7 @@ local function showArrow(fromSquare, toSquare, color, labelText, zIndex)
         label.Outline = true
         label.Color = Color3.fromRGB(255, 245, 80)
         pcall(function() label.Font = 2 end)
-        pcall(function() label.ZIndex = zIndex + 2 end)
+        pcall(function() label.ZIndex = 100 end)
         label.Visible = true
     end
     arrows[#arrows + 1] = {Line = arrowLine, Head = arrowHead, Label = label}
@@ -264,19 +280,6 @@ local function updateVisualCalibration()
 end
 
 local RoChessUI
-local function clearMaxStockfishConfig()
-    if maxStockfishConfigCleaned then return end
-    maxStockfishConfigCleaned = true
-    pcall(function()
-        local configPath = "rochess.json"
-        if not isfile(configPath) then return end
-        local saved = HttpService:JSONDecode(readfile(configPath))
-        if type(saved) ~= "table" then return end
-        saved["RoChess/Game settings/Max Stockfish (slower)"] = nil
-        writefile(configPath, HttpService:JSONEncode(saved))
-    end)
-end
-
 local function setupInterfaceChoice()
     local savedChoice
     pcall(function()
@@ -354,14 +357,17 @@ local function setupInterfaceChoice()
     end})
     local gameTab = main
     local game = gameTab:AddIsland({Title="Game settings", Description="Position and move preferences"})
-    game:AddDropdown({Title="Play as", Options={"White","Black"}, Default=PLAY_AS, Callback=function(value) applyPlayAs(value) end})
+    game:AddDropdown({Title="Play as", Options={"White","Black"}, Default=PLAY_AS, Callback=function(value)
+        if not playAsUiReady then return end
+        AUTO_DETECT_COLOR = false
+        applyPlayAs(value)
+    end})
     game:AddDropdown({Title="Playing style", Options={"Standard","Aggressive","Defensive"}, Default=PLAY_STYLE:gsub("^%l",string.upper), Callback=function(value) PLAY_STYLE=string.lower(value) end})
     game:AddDropdown({Title="Opening", Options={"Automatic","Italian Game","Sicilian Defense","French Defense","Caro-Kann Defense","Alien Gambit","Queen's Gambit","King's Indian Defense","English Opening"}, Default=OPENING_NAME, Callback=function(value)
         OPENING_NAME=value; openingActive=value~="Automatic"; moveHistory={}; openingRefreshRequested=true; newGameRequested=true; removeArrow()
     end})
     game:AddToggle({Title="Second best move", Default=SECOND_MOVE_ENABLED, Callback=function(value) SECOND_MOVE_ENABLED=value end})
-    game:AddToggle({Title="Max Stockfish (slower)", Default=MAX_STOCKFISH, Callback=function(value)
-        if maxStockfishStartupReset then return end
+    game:AddToggle({Title="Max Stockfish (slower)", Default=false, Callback=function(value)
         MAX_STOCKFISH = value
     end})
     game:AddToggle({Title="Premove", Default=SHOW_OUT_OF_TURN, Callback=function(value)
@@ -376,6 +382,23 @@ local function setupInterfaceChoice()
     actions:AddButton({Title="Visual Calibration", ButtonText="Open", Callback=function()
         beginVisualCalibration()
         print("[Chess] Visual calibration opened")
+    end})
+    actions:AddButton({Title="Save visual calibration", ButtonText="Save", Callback=function()
+        if calibrationActive then
+            calibrationConfirm = true
+            print("[Chess] Calibration save requested")
+        else
+            print("[Chess] Calibration is not active")
+        end
+    end})
+    actions:AddButton({Title="Reset calibration", ButtonText="Reset", Callback=function()
+        pcall(function() if isfile(CALIBRATION_FILE) then delfile(CALIBRATION_FILE) end end)
+        calibrationOffsetX, calibrationOffsetY, calibrationSquareScale = 0, 0, 1
+        calibrationSaved, calibrationSignature = false, nil
+        boardCenters = {}
+        cachedSquares = nil
+        calibrationActive = false
+        print("[Chess Detect] Calibration reset to default")
     end})
     actions:AddButton({Title="Use Matcha UI next launch", ButtonText="Switch", Callback=function()
         pcall(function() writefile(CUSTOM_UI_CHOICE_FILE, HttpService:JSONEncode({choice="matcha"})) end)
@@ -512,9 +535,8 @@ do
     end
 end
 
--- Max Stockfish is runtime-only; remove any persisted UI value before JDUI loads.
-clearMaxStockfishConfig()
 setupInterfaceChoice()
+playAsUiReady = true
 
 if not useCustomUI and UI and UI.AddTab then
     UI.AddTab("RoChess AI", function(tab)
@@ -536,7 +558,6 @@ if not useCustomUI and UI and UI.AddTab then
             SECOND_MOVE_ENABLED = text == "On"
         end)
         settings:Combo("chess_max_stockfish", "Max Stockfish (depth 21)", {"Off", "On"}, 0, function(_, text)
-            if maxStockfishStartupReset then return end
             MAX_STOCKFISH = text == "On"
         end)
         settings:Combo("chess_premove", "Premove", {"Off", "On"}, 0, function(_, text)
@@ -580,14 +601,16 @@ if not useCustomUI and UI and UI.AddTab then
         settings:Button("Save visual calibration", function()
             calibrationConfirm = true
         end)
-        settings:Button("Delete saved calibration", function()
+        settings:Button("Reset calibration", function()
             pcall(function()
                 if isfile(CALIBRATION_FILE) then delfile(CALIBRATION_FILE) end
             end)
-            calibrationOffsetX, calibrationOffsetY = 0, 0
+            calibrationOffsetX, calibrationOffsetY, calibrationSquareScale = 0, 0, 1
             calibrationSaved, calibrationSignature = false, nil
-            beginVisualCalibration()
-            print("[Chess Detect] Saved calibration deleted")
+            boardCenters = {}
+            cachedSquares = nil
+            calibrationActive = false
+            print("[Chess Detect] Calibration reset to default")
         end)
         settings:Button("New Game", function()
             newGameRequested = true
@@ -715,21 +738,22 @@ local function pieceCode(pieceType)
 end
 
 local cachedSquareFolder, cachedPieceFolder
+local cachedRank1, cachedFile1
+local cachedSquares
+local lastGeometryRefreshAt = 0
+local GEOMETRY_REFRESH_INTERVAL = 0.5
 local function getBoard(forceRefresh)
     if not forceRefresh and cachedSquareFolder and cachedPieceFolder then
-        local cachedOk = pcall(function()
-            return cachedSquareFolder:GetChildren(), cachedPieceFolder:GetChildren()
-        end)
-        if cachedOk then
-            return cachedSquareFolder, cachedPieceFolder
-        end
-        cachedSquareFolder, cachedPieceFolder = nil, nil
+        return cachedSquareFolder, cachedPieceFolder
     end
     local gui = child(player, "PlayerGui")
     for _ = 1, 80 do
         local board = child(child(child(gui, "ChessUI"), "Root"), "Board")
         local squares, pieces = child(board, "Squares"), child(board, "Pieces")
         if squares and pieces then
+            if squares ~= cachedSquareFolder then
+                cachedRank1, cachedFile1 = nil, nil
+            end
             cachedSquareFolder, cachedPieceFolder = squares, pieces
             return squares, pieces
         end
@@ -740,20 +764,23 @@ end
 
 local function detectPlayAs()
     local okBoard, squares = pcall(function()
-        return select(1, getBoard(true))
+        return select(1, getBoard(false))
     end)
     if not okBoard then return nil end
     -- RoChess currently stores the coordinate labels in an unnamed sibling
     -- Frame under Board; older builds used a named Coords Frame. Search the
     -- board subtree so both layouts work.
-    local board = squares and squares.Parent
-    local rank1, file1
-    if board then
-        for _, object in ipairs(board:GetDescendants()) do
-            if object.Name == "Rank1" then rank1 = object end
-            if object.Name == "File1" then file1 = object end
-            if rank1 and file1 then break end
+    local rank1, file1 = cachedRank1, cachedFile1
+    if not rank1 or not file1 then
+        local board = squares and squares.Parent
+        if board then
+            for _, object in ipairs(board:GetDescendants()) do
+                if object.Name == "Rank1" then rank1 = object end
+                if object.Name == "File1" then file1 = object end
+                if rank1 and file1 then break end
+            end
         end
+        cachedRank1, cachedFile1 = rank1, file1
     end
     if not rank1 or not file1 then return nil end
     local ok, rankText, fileText = pcall(function()
@@ -791,6 +818,26 @@ function applyPlayAs(color)
     end
 end
 
+local function sideForAnalysis(actualWhiteToMove)
+    if SHOW_OUT_OF_TURN and (PLAY_AS == "White" or PLAY_AS == "Black") then
+        return PLAY_AS == "White"
+    end
+    return actualWhiteToMove
+end
+
+local function isPremovePosition(actualWhiteToMove)
+    return SHOW_OUT_OF_TURN
+        and (PLAY_AS == "White" or PLAY_AS == "Black")
+        and (PLAY_AS == "White") ~= actualWhiteToMove
+end
+
+local function primaryArrowColor(actualWhiteToMove)
+    if isPremovePosition(actualWhiteToMove) then
+        return Color3.fromRGB(255, 215, 40)
+    end
+    return Color3.fromRGB(40, 220, 80)
+end
+
 local function getToken(piece)
     local ok, address = pcall(function() return piece.Address end)
     if ok and type(address) == "number" and address > 0 then
@@ -799,11 +846,7 @@ local function getToken(piece)
     return piece
 end
 
-local function scan()
-    local squareFolder, pieceFolder = getBoard()
-    if not squareFolder or not pieceFolder then
-        error("Chess board not found. Open RoChess first.")
-    end
+local function refreshBoardGeometry(squareFolder)
     local squares, byIndex = {}, {}
     for _, square in ipairs(squareFolder:GetChildren()) do
         local index = tonumber(square.Name:match("^S(%d+)$"))
@@ -846,6 +889,19 @@ local function scan()
     local lastSquare = byIndex[64]
     local signature = string.format("%.1f,%.1f,%.1f,%.1f,%.1f,%.1f", firstSquare.x, firstSquare.y, spacing, lastSquare.x, lastSquare.y, #squares)
     saveCalibration(signature)
+    cachedSquares, cachedSpacing = squares, spacing
+    lastGeometryRefreshAt = tick()
+    return squares, spacing
+end
+
+local function scan()
+    local squareFolder, pieceFolder = getBoard()
+    local squares, spacing
+    if not cachedSquares or tick() - lastGeometryRefreshAt >= GEOMETRY_REFRESH_INTERVAL then
+        squares, spacing = refreshBoardGeometry(squareFolder)
+    else
+        squares, spacing = cachedSquares, cachedSpacing
+    end
     local tokens, occupied = {}, {}
     for _, piece in ipairs(pieceFolder:GetChildren()) do
         if piece.ClassName == "ImageLabel" or piece.ClassName == "ImageButton" then
@@ -940,7 +996,8 @@ local function positionKey(fen)
 end
 
 local function recordPosition(snapshot)
-    local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
+    local fen = makeFen(snapshot, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
+    local premove = isPremovePosition(whiteToMove)
     local key = positionKey(fen)
     positionCounts[key] = (positionCounts[key] or 0) + 1
     return positionCounts[key], key
@@ -959,9 +1016,10 @@ local function positionReady(snapshot)
     if whiteKing ~= 1 or blackKing ~= 1 then return false, "invalid king count" end
     return true
 end
-local function askStockfish(fen, avoidMoves)
-    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, max_stockfish=MAX_STOCKFISH, analysis_time=ANALYSIS_TIME_MODE == "superfast" and 0.1 or nil}
-    if SECOND_MOVE_ENABLED then request.include_alternative = true end
+local function askStockfish(fen, avoidMoves, includeAlternative)
+    local request = {fen=fen, strength=STRENGTH, style=PLAY_STYLE, engine=ENGINE, analysis_time=0.1, max_stockfish=MAX_STOCKFISH}
+    if includeAlternative == nil then includeAlternative = SECOND_MOVE_ENABLED end
+    if includeAlternative then request.include_alternative = true end
     if TARGET_ELO then request.target_elo = TARGET_ELO end
     if avoidMoves and #avoidMoves > 0 then request.avoid_moves = avoidMoves end
     local body = HttpService:JSONEncode(request)
@@ -984,7 +1042,7 @@ local function flipFenTurn(fen)
     return table.concat(fields, " ")
 end
 
-local function bestMove(fen, snapshot, avoidMoves)
+local function bestMove(fen, snapshot, avoidMoves, includeAlternative)
     if openingActive and OPENING_NAME ~= "Automatic" then
         local line = openingLines[OPENING_NAME]
         local forced = line and line[#moveHistory + 1]
@@ -992,7 +1050,7 @@ local function bestMove(fen, snapshot, avoidMoves)
             return {bestmove=forced, backend="opening"}
         end
     end
-    return askStockfish(fen, avoidMoves)
+    return askStockfish(fen, avoidMoves, includeAlternative)
 end
 
 local function checkAnnouncement()
@@ -1141,8 +1199,9 @@ local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
     pendingFen = nil
     pendingPromotion = nil
     positionCounts = {}
-    repetitionMoves = {}
     lastPlayedUci = nil
+    lastProcessedMoveUci = nil
+    lastProcessedMoveAt = 0
     lastRepetitionWarningKey = nil
     lastRepetitionWarningCount = 0
     removeArrow()
@@ -1191,13 +1250,12 @@ local function recommend(snapshot)
         analysisRetryAt = tick() + 0.35
         return false
     end
-    local fen = makeFen(snapshot, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
-    local premove = isPremovePosition(whiteToMove)
-    local result, errorMessage = bestMove(fen, snapshot)
+    local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
+    local result, errorMessage = bestMove(fen, snapshot, nil, not premove)
     if (not result or not result.bestmove) and tostring(errorMessage):lower():find("illegal") then
         local alternateFen = flipFenTurn(fen)
         if alternateFen then
-            local alternateResult, alternateError = bestMove(alternateFen, snapshot)
+            local alternateResult, alternateError = bestMove(alternateFen, snapshot, nil, not premove)
             if alternateResult and alternateResult.bestmove then
                 whiteToMove = not whiteToMove
                 fen = alternateFen
@@ -1233,11 +1291,12 @@ local function recommend(snapshot)
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
     local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-    showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel, 1000)
+    showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
+    showPrimaryTileOutlines(fromSquare, toSquare)
     if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
         local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
-        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel, 800)
+        showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
     end
     local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
     local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
@@ -1266,13 +1325,6 @@ end
 while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     checkAnnouncement()
     if customUI and useCustomUI then customUI:step() end
-    if maxStockfishStartupReset then
-        -- Matcha may restore the previous combo selection during the first UI
-        -- step. Apply the per-execution default after that restoration occurs.
-        MAX_STOCKFISH = false
-        maxStockfishStartupReset = false
-        clearMaxStockfishConfig()
-    end
     if not useCustomUI and UI and UI.GetValue then
         local selected = selectedPlayAs(UI.GetValue("chess_play_as"))
         if selected and lastPlayAsSelection == nil then
@@ -1297,11 +1349,17 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         initialAnalysisEarliest = tick()
         analysisRefreshRequested = false
     end
-    if AUTO_DETECT_COLOR then
+    if AUTO_DETECT_COLOR and tick() - lastColorDetectAt >= COLOR_DETECT_INTERVAL then
+        lastColorDetectAt = tick()
         local detected = detectPlayAs()
-        if detected and detected ~= PLAY_AS then
-            applyPlayAs(detected)
-            print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
+        if detected then
+            if detected ~= PLAY_AS then
+                applyPlayAs(detected)
+                print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
+            end
+            -- Lock the result for this game. A transient label read must not
+            -- flip sides, reset the move tracker, and clear the arrows.
+            AUTO_DETECT_COLOR = false
         end
     end
     wait(SCAN_DELAY)
@@ -1349,6 +1407,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         end
         positionCounts = {}
         lastPlayedUci = nil
+        lastProcessedMoveUci, lastProcessedMoveAt = nil, 0
         previous = current
         if PLAY_AS == "Black" and not atStartingPosition then
             whiteToMove = false
@@ -1382,6 +1441,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             whiteToMove = side
             positionCounts = {}
             lastPlayedUci = nil
+            lastProcessedMoveUci, lastProcessedMoveAt = nil, 0
             recordPosition(current)
             awaitingImport = false
             initialAnalysisPending = true
@@ -1412,6 +1472,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 whiteToMove = true
                 positionCounts = {}
                 lastPlayedUci = nil
+                lastProcessedMoveUci, lastProcessedMoveAt = nil, 0
                 recordPosition(current)
                 halfmove, fullmove = 0, 1
                 castlingRights, enPassantTarget = "KQkq", "-"
@@ -1610,6 +1671,14 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         moveHistory[#moveHistory + 1] = playedUci
                     end
                 end
+                if playedUci == lastProcessedMoveUci and tick() - lastProcessedMoveAt < 2 then
+                    -- The board can expose the same completed animation twice.
+                    -- Ignore the duplicate before changing turn/FEN state.
+                    previous = confirmed
+                    continue
+                end
+                lastProcessedMoveUci = playedUci
+                lastProcessedMoveAt = tick()
                 whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
                 if wasPawn or capture then
                     halfmove = 0
@@ -1620,16 +1689,12 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     fullmove = fullmove + 1
                 end
                 lastPlayedUci = playedUci
-                local sourceFen = makeFen(previous, pieceTypes, not whiteToMove, halfmove, fullmove)
-                local sourceKey = positionKey(sourceFen)
-                repetitionMoves[sourceKey] = repetitionMoves[sourceKey] or {}
-                repetitionMoves[sourceKey][playedUci] = true
                 local repetitionCount, repetitionKey = recordPosition(confirmed)
                 if repetitionCount >= 2 and (repetitionKey ~= lastRepetitionWarningKey or repetitionCount ~= lastRepetitionWarningCount) then
                     lastRepetitionWarningKey = repetitionKey
                     lastRepetitionWarningCount = repetitionCount
                     if repetitionCount >= 3 then
-                        print("[Chess] Threefold repetition detected; avoiding moves that repeat this position")
+                        print("[Chess] Threefold repetition detected; avoiding the previous move")
                     else
                         print("[Chess] Repetition detected; position seen twice")
                     end
@@ -1643,20 +1708,13 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     if ready then
                         local fen = makeFen(confirmed, pieceTypes, sideForAnalysis(whiteToMove), halfmove, fullmove)
                         local premove = isPremovePosition(whiteToMove)
-                        local avoidMoves
-                        local repeatedMoves = repetitionMoves[repetitionKey]
-                        if repetitionCount >= 2 and repeatedMoves then
-                            avoidMoves = {}
-                            for uci in pairs(repeatedMoves) do
-                                avoidMoves[#avoidMoves + 1] = uci
-                            end
-                        end
+                        local avoidMoves = repetitionCount >= 2 and lastPlayedUci and {lastPlayedUci} or nil
                         if fen == lastAnalysisFen and tick() - lastAnalysisAt < 3 then
                             result = nil
                         else
                             lastAnalysisFen = fen
                             lastAnalysisAt = tick()
-                            result, errorMessage = bestMove(fen, confirmed, avoidMoves)
+                            result, errorMessage = bestMove(fen, confirmed, avoidMoves, not premove)
                             if result and result.bestmove then
                             else
                             end
@@ -1686,11 +1744,12 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
                         local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
-                        showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel, 1000)
+                        showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
+                        showPrimaryTileOutlines(fromSquare, toSquare)
                         if not premove and SECOND_MOVE_ENABLED and result.alternative and result.alternative ~= result.bestmove then
                             local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
-                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel, 800)
+                            showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
                         end
                         local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
                         local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
