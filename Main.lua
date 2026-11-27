@@ -1276,6 +1276,14 @@ local function recommend(snapshot)
     end
     if not result or not result.bestmove then
         print("[DBG] REJECT|fen=" .. tostring(fen) .. "|t=" .. (whiteToMove and "w" or "b") .. "|cr=" .. tostring(castlingRights) .. "|ep=" .. tostring(enPassantTarget) .. "|err=" .. tostring(errorMessage))
+        local rejectText = string.lower(tostring(errorMessage or ""))
+        if string.find(rejectText, "illegal") or string.find(rejectText, "invalid fen") then
+            -- A capture/premove can expose one transitional frame. Do not mark
+            -- the engine offline or pause for seconds; retry the same position
+            -- after the board settles.
+            analysisRetryAt = tick() + 0.12
+            return false
+        end
         updateStockfishStatus(false, errorMessage)
         print("[Chess Detect] " .. describeAnalysisError(errorMessage))
         analysisRetryAt = tick() + 2
@@ -1776,8 +1784,15 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
                         print("[" .. engineName .. " " .. backend .. "] " .. message)
                     elseif errorMessage then
-                        updateStockfishStatus(false, errorMessage)
-                        print("[Chess Detect] " .. describeAnalysisError(errorMessage))
+                        local errorText = string.lower(tostring(errorMessage))
+                        if string.find(errorText, "illegal") or string.find(errorText, "invalid fen") then
+                            initialAnalysisPending = true
+                            analysisRetryAt = tick() + 0.12
+                            print("[Chess Detect] Board transition detected; retrying analysis")
+                        else
+                            updateStockfishStatus(false, errorMessage)
+                            print("[Chess Detect] " .. describeAnalysisError(errorMessage))
+                        end
                     end
                 end
             end
