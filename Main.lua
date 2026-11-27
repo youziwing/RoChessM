@@ -50,11 +50,14 @@ local playAsUiReady = false
 -- Auto-detect is the startup behavior; the UI intentionally exposes only
 -- White and Black. Changing the combo switches to a manual override.
 local AUTO_DETECT_COLOR = true
+local colorManualOverride = false
+local colorCandidate, colorCandidateCount
 local lastPlayAsSelection = nil
 local lastColorDetectAt = 0
 local boardCenters = {}
 local boardSquareObjects = {}
 local cachedSpacing
+local cachedRank1, cachedFile1
 local arrows = {}
 local applyPlayAs
 local newGameRequested = false
@@ -359,6 +362,7 @@ local function setupInterfaceChoice()
     local game = gameTab:AddIsland({Title="Game settings", Description="Position and move preferences"})
     game:AddDropdown({Title="Play as", Options={"White","Black"}, Default=PLAY_AS, Callback=function(value)
         if not playAsUiReady then return end
+        colorManualOverride = true
         AUTO_DETECT_COLOR = false
         applyPlayAs(value)
     end})
@@ -376,6 +380,11 @@ local function setupInterfaceChoice()
     end})
     local actions = gameTab:AddIsland({Title="Actions", Description="Game and position controls"})
     actions:AddButton({Title="New Game", ButtonText="Reset", Callback=function()
+        if not colorManualOverride then
+            AUTO_DETECT_COLOR = true
+            colorCandidate, colorCandidateCount = nil, 0
+            cachedRank1, cachedFile1 = nil, nil
+        end
         newGameRequested = true
         print("[Chess] New Game requested")
     end})
@@ -738,7 +747,6 @@ local function pieceCode(pieceType)
 end
 
 local cachedSquareFolder, cachedPieceFolder
-local cachedRank1, cachedFile1
 local cachedSquares
 local lastGeometryRefreshAt = 0
 local GEOMETRY_REFRESH_INTERVAL = 0.5
@@ -1333,11 +1341,13 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             -- for it. Black on the initial screen is an explicit useful
             -- choice and must not be discarded before the first scan.
             if selected == "Black" then
+                colorManualOverride = true
                 AUTO_DETECT_COLOR = false
                 applyPlayAs(selected)
             end
         elseif selected and selected ~= lastPlayAsSelection then
             lastPlayAsSelection = selected
+            colorManualOverride = true
             AUTO_DETECT_COLOR = false
             applyPlayAs(selected)
         end
@@ -1353,13 +1363,19 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         lastColorDetectAt = tick()
         local detected = detectPlayAs()
         if detected then
-            if detected ~= PLAY_AS then
+            if detected == colorCandidate then
+                colorCandidateCount = (colorCandidateCount or 0) + 1
+            else
+                colorCandidate, colorCandidateCount = detected, 1
+            end
+            if colorCandidateCount >= 2 then
+                if detected ~= PLAY_AS then
                 applyPlayAs(detected)
                 print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
+                end
+                -- Lock only after two matching reads from the same board.
+                AUTO_DETECT_COLOR = false
             end
-            -- Lock the result for this game. A transient label read must not
-            -- flip sides, reset the move tracker, and clear the arrows.
-            AUTO_DETECT_COLOR = false
         end
     end
     wait(SCAN_DELAY)
@@ -1384,6 +1400,11 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     if success then
         local atStartingPosition, detectedTypes = isStartingPosition(current)
         if atStartingPosition and not previousWasStartingPosition and not newGameRequested then
+            if not colorManualOverride then
+                AUTO_DETECT_COLOR = true
+                colorCandidate, colorCandidateCount = nil, 0
+                cachedRank1, cachedFile1 = nil, nil
+            end
             resetForNewGame(current, true, detectedTypes)
             previousWasStartingPosition = true
             continue
