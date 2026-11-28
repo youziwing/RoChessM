@@ -989,7 +989,6 @@ local function clickPromotionChoice(kind, fallbackCenter)
             mousemoveabs(x, y)
             task.wait(0.08)
             mouse1click()
-            print("[Chess Input] Promotion choice clicked: " .. tostring(kind))
             task.wait(0.12)
             return true
         end
@@ -1002,11 +1001,9 @@ local function clickPromotionChoice(kind, fallbackCenter)
         mousemoveabs(x, y)
         task.wait(0.08)
         mouse1click()
-        print("[Chess Input] Promotion Queen slot clicked at " .. tostring(x) .. "," .. tostring(y))
         task.wait(0.12)
         return true
     end
-    print("[Chess Input] Promotion choice not found: " .. tostring(kind))
     return false
 end
 
@@ -1065,7 +1062,6 @@ local function autoMoveBest(fromSquare, toSquare, promotionKind)
         task.wait(0.05)
     end
     click(centerFrom)
-    print("[Chess Input] Source clicked: " .. fromSquare)
     local target = centerTo
     local legal = false
     local hintDeadline = tick() + 1.0
@@ -1089,10 +1085,8 @@ local function autoMoveBest(fromSquare, toSquare, promotionKind)
         end
         if not legal then task.wait(0.03) end
     end
-    print("[Chess Input] Destination hint " .. toSquare .. ": " .. tostring(legal))
     if not legal then return false end
     click(centerTo)
-    print("[Chess Input] Destination clicked: " .. toSquare)
     if promotionKind and not clickPromotionChoice(promotionKind, centerTo) then
         return false
     end
@@ -1551,7 +1545,6 @@ local function recommend(snapshot, previewOnly)
         task.wait(AUTO_MOVE_ARROW_HOLD)
         local moved = autoMoveBest(fromSquare, toSquare, promotionNames[promotion])
         if not moved then
-            print("[Chess Input] Move not confirmed; keeping the position pending")
             if blockedMoveFen == fen and blockedMoveUci == result.bestmove then
                 blockedMoveAttempts = blockedMoveAttempts + 1
             else
@@ -1597,7 +1590,6 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     pcall(function() autoMoveKeyDown = iskeypressed(AUTO_MOVE_HOTKEY) end)
     if autoMoveKeyDown and not autoMoveKeyWasDown then
         AUTO_MOVE = not AUTO_MOVE
-        print("[Chess Input] Auto-move " .. (AUTO_MOVE and "enabled" or "disabled"))
         pcall(function() notify("RoChess", "Auto-move " .. (AUTO_MOVE and "enabled" or "disabled"), 3) end)
     end
     autoMoveKeyWasDown = autoMoveKeyDown
@@ -1915,7 +1907,6 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     whiteToMove = PLAY_AS ~= "Black"
                     initialAnalysisPending = true
                     analysisRetryAt = 0
-                    print("[Chess Detect] Opponent board change confirmed; analysis unlocked")
                 end
             end
             local promotionCandidate = (#added == 1)
@@ -2058,7 +2049,6 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 if awaitingOpponentMove and move.piece
                     and move.piece:sub(1, 5) ~= PLAY_AS then
                     awaitingOpponentMove = false
-                    print("[Chess Detect] Opponent move confirmed; analysis unlocked")
                 end
                 debugDetection(confirmed, "after turn update", halfmove, fullmove)
                 if wasPawn or capture then
@@ -2169,7 +2159,6 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                             task.wait(AUTO_MOVE_ARROW_HOLD)
                             local moved = autoMoveBest(fromSquare, toSquare, promotionNames[promotion])
                             if not moved then
-                                print("[Chess Input] Move not confirmed; retrying board detection")
                                 if blockedMoveFen == fen and blockedMoveUci == result.bestmove then
                                     blockedMoveAttempts = blockedMoveAttempts + 1
                                 else
@@ -2193,7 +2182,6 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                             rejectedFen = fen
                             initialAnalysisPending = true
                             analysisRetryAt = tick() + 0.12
-                            print("[Chess Detect] Board transition detected; retrying analysis")
                         else
                             updateStockfishStatus(false, errorMessage)
                             print("[Chess Detect] " .. describeAnalysisError(errorMessage))
