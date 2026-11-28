@@ -27,7 +27,7 @@ local DEBUG_DETECTION = false
 local SECOND_MOVE_ENABLED = true
 local MAX_STOCKFISH = false
 local SHOW_OUT_OF_TURN = false
-local AUTO_MOVE = true
+local AUTO_MOVE = false
 local AUTO_MOVE_HOTKEY = 114 -- F3 for Matcha iskeypressed
 local autoMoveKeyWasDown = false
 local AUTO_MOVE_DELAY = 0.20
@@ -70,6 +70,45 @@ local cachedHintFolder
 local cachedSpacing
 local cachedRank1, cachedFile1
 local arrows = {}
+local startupSplash
+local startupSplashSubtitle
+
+local function showAutoMoveSplash(enabled)
+    pcall(function()
+        if startupSplash then startupSplash:Remove() end
+        if startupSplashSubtitle then startupSplashSubtitle:Remove() end
+        startupSplash = Drawing.new("Text")
+        startupSplashSubtitle = Drawing.new("Text")
+        local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+        local x = viewport and math.max(420, viewport.X - 360) or 1450
+        startupSplash.Text = enabled and "AUTO-MOVE ENABLED" or "AUTO-MOVE DISABLED"
+        startupSplash.Position = Vector2.new(x, 110)
+        startupSplash.Size = 28
+        startupSplash.Color = enabled
+            and Color3.fromRGB(40, 255, 95)
+            or Color3.fromRGB(255, 70, 70)
+        startupSplash.Outline = true
+        startupSplash.Center = false
+        startupSplash.Visible = true
+        startupSplashSubtitle.Text = "F3 TO TURN ON/OFF"
+        startupSplashSubtitle.Position = Vector2.new(x, 145)
+        startupSplashSubtitle.Size = 19
+        startupSplashSubtitle.Color = Color3.fromRGB(235, 235, 235)
+        startupSplashSubtitle.Outline = true
+        startupSplashSubtitle.Center = false
+        startupSplashSubtitle.Visible = true
+        task.delay(6, function()
+            if startupSplash then
+                pcall(function() startupSplash:Remove() end)
+                startupSplash = nil
+            end
+            if startupSplashSubtitle then
+                pcall(function() startupSplashSubtitle:Remove() end)
+                startupSplashSubtitle = nil
+            end
+        end)
+    end)
+end
 local applyPlayAs
 local newGameRequested = false
 local promotionNames = {q="Queen", r="Rook", b="Bishop", n="Knight"}
@@ -1065,6 +1104,8 @@ local function autoMoveBest(fromSquare, toSquare, promotionKind)
     local target = centerTo
     local legal = false
     local hintDeadline = tick() + 1.0
+    local sourceRetryAt = tick() + 0.28
+    local sourceClicks = 1
     while tick() < hintDeadline and not legal do
         for i = 1, 32 do
             local hint = child(cachedHintFolder, "Hint" .. tostring(i))
@@ -1083,7 +1124,19 @@ local function autoMoveBest(fromSquare, toSquare, promotionKind)
                 end
             end
         end
-        if not legal then task.wait(0.03) end
+        if not legal then
+            -- The first move can arrive while the board input layer is still
+            -- attaching after a new game. Retry the source click only when no
+            -- legal hint appeared, so a successful selection is never toggled
+            -- off by an unnecessary second click.
+            if tick() >= sourceRetryAt and sourceClicks < 3 then
+                click(centerFrom)
+                sourceClicks = sourceClicks + 1
+                sourceRetryAt = tick() + 0.28
+            else
+                task.wait(0.03)
+            end
+        end
     end
     if not legal then return false end
     click(centerTo)
@@ -1274,6 +1327,7 @@ end
 
 local ok, previous = pcall(scan)
 if not ok then print("[Chess Detect] Initialization failed: " .. tostring(previous)); return end
+showAutoMoveSplash(AUTO_MOVE)
 pieceTypes = {}
 local known = 0
 local unknownTokens = {}
@@ -1590,6 +1644,20 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     pcall(function() autoMoveKeyDown = iskeypressed(AUTO_MOVE_HOTKEY) end)
     if autoMoveKeyDown and not autoMoveKeyWasDown then
         AUTO_MOVE = not AUTO_MOVE
+        if AUTO_MOVE then
+            -- Turning auto-move on must re-arm the analysis loop immediately;
+            -- otherwise the initial position can remain marked as already
+            -- processed and the first move is never submitted.
+            initialAnalysisPending = true
+            analysisRetryAt = 0
+            lastAnalysisFen = nil
+            blockedMoveFen = nil
+            blockedMoveUci = nil
+            blockedMoveAttempts = 0
+        else
+            initialAnalysisPending = false
+        end
+        showAutoMoveSplash(AUTO_MOVE)
         pcall(function() notify("RoChess", "Auto-move " .. (AUTO_MOVE and "enabled" or "disabled"), 3) end)
     end
     autoMoveKeyWasDown = autoMoveKeyDown
