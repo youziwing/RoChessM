@@ -23,7 +23,7 @@ local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
 local PLAY_STYLE = "standard"
 local ENGINE = "stockfish"
-local DEBUG_DETECTION = true
+local DEBUG_DETECTION = false
 local SECOND_MOVE_ENABLED = true
 local MAX_STOCKFISH = false
 local SHOW_OUT_OF_TURN = false
@@ -1489,7 +1489,6 @@ local function recommend(snapshot, previewOnly)
     -- the opponent's piece.  Keep the current turn and retry after the next
     -- stable scan instead.
     if not result or not result.bestmove then
-        print("[DBG] REJECT|fen=" .. tostring(fen) .. "|t=" .. (whiteToMove and "w" or "b") .. "|cr=" .. tostring(castlingRights) .. "|ep=" .. tostring(enPassantTarget) .. "|err=" .. tostring(errorMessage))
         local rejectText = string.lower(tostring(errorMessage or ""))
         if string.find(rejectText, "illegal") or string.find(rejectText, "invalid fen") then
             -- A capture/promotion/castling transition can expose one invalid
