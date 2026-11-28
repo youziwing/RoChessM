@@ -3,8 +3,11 @@ local FLIP_BOARD = false
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
+if type(_G.ChessBestStop) == "function" then pcall(_G.ChessBestStop) end
+local sessionAlive = true
 local ROCHESS_SESSION = tostring(tick()) .. ":" .. tostring(math.random(1, 1000000000))
 _G.__ROCHESS_SESSION = ROCHESS_SESSION
+_G.ChessBestStop = function() sessionAlive = false end
 local DEVICE_ID = "anonymous"
 pcall(function() DEVICE_ID = tostring(gethwid()) end)
 if DEVICE_ID == "" or DEVICE_ID == "nil" then DEVICE_ID = "anonymous" end
@@ -20,9 +23,16 @@ local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
 local PLAY_STYLE = "standard"
 local ENGINE = "stockfish"
+local DEBUG_DETECTION = true
 local SECOND_MOVE_ENABLED = true
 local MAX_STOCKFISH = false
 local SHOW_OUT_OF_TURN = false
+local AUTO_MOVE = true
+local AUTO_MOVE_HOTKEY = 114 -- F3 for Matcha iskeypressed
+local autoMoveKeyWasDown = false
+local AUTO_MOVE_DELAY = 0.20
+local AUTO_MOVE_ARROW_HOLD = 0.30
+local AUTO_MOVE_CONFIRM_WAIT = 2.0
 local analysisRefreshRequested = false
 local TARGET_ELO = nil
 local OPENING_NAME = "Automatic"
@@ -56,6 +66,7 @@ local lastPlayAsSelection = nil
 local lastColorDetectAt = 0
 local boardCenters = {}
 local boardSquareObjects = {}
+local cachedHintFolder
 local cachedSpacing
 local cachedRank1, cachedFile1
 local arrows = {}
@@ -76,16 +87,22 @@ local calibrationSaved = false
 local calibrationOffsetX = 0
 local calibrationOffsetY = 0
 local calibrationSquareScale = 1
-local calibrationActive = true
+-- Calibration is an explicit UI action.  It must not block the normal
+-- detector on startup; saved offsets are still used when present.
+local calibrationActive = false
 local calibrationConfirm = false
 local calibrationPoints = {}
 local calibrationDrawings = {}
+local whiteToMove = true
 pcall(function()
     if isfile(CALIBRATION_FILE) then
         local saved = HttpService:JSONDecode(readfile(CALIBRATION_FILE))
         calibrationOffsetX = tonumber(saved.offsetX) or 0
         calibrationOffsetY = tonumber(saved.offsetY) or 0
-        calibrationActive = tonumber(saved.version) ~= 4
+        -- Older calibration files should not force calibration mode on every
+        -- execution.  Use their offsets, but only enter calibration after the
+        -- user presses Start visual calibration.
+        calibrationActive = false
         calibrationSquareScale = tonumber(saved.squareScale) or 1
     end
 end)
@@ -297,6 +314,9 @@ local function setupInterfaceChoice()
     end
     local ok, jdui = pcall(function()
         local source = httpget("https://raw.githubusercontent.com/jdev-studio/jdui/refs/heads/main/JDUI")
+        -- Keep long tab titles instead of JDUI truncating them with "..".
+        source = source:gsub('return Q%(g, 1, s%) %.%. "%.%.";', 'return g;')
+        source = source:gsub('return n<4 and s:sub%(1,n%) or s:sub%(1,n%-3%)%.%."%.%.%."', 'return s')
         -- Matcha can stall when JDUI pre-scans every keyboard code on textbox focus.
         -- Text capture still receives newly pressed keys without this pre-scan.
         source = source:gsub('for k=8,254 do capture%.keys%[k%]=iskeypressed%(k%) end', '')
@@ -335,7 +355,7 @@ local function setupInterfaceChoice()
         return false
     end
     useCustomUI = true
-    local main = jdui:AddTab({Title="RoChess", Icon="bolt"})
+    local main = jdui:AddTab({Title="RoChess | F3 Auto Move | RShift Menu", Icon="bolt"})
     local engine = main:AddIsland({Title="Engine", Description="Choose the analysis backend"})
     engine:AddDropdown({Title="Engine", Options={"Stockfish","Maia (Human Like)"}, Default=ENGINE=="maia" and "Maia (Human Like)" or "Stockfish", Callback=function(value)
         ENGINE = value == "Maia (Human Like)" and "maia" or "stockfish"
@@ -422,7 +442,7 @@ local function setupInterfaceChoice()
     pcall(function() jdui:SetOverflow("Scroll") end)
     pcall(function() jdui:SetOpacity(1) end)
     pcall(function() jdui:SetTitle("RoChess") end)
-    pcall(function() jdui:SetSubtitle("Stockfish / Maia") end)
+    pcall(function() jdui:SetSubtitle("") end)
     pcall(function() jdui:SetEffects(false) end)
     main:Select()
     return true
@@ -573,6 +593,7 @@ if not useCustomUI and UI and UI.AddTab then
             SHOW_OUT_OF_TURN = text == "On"
             analysisRefreshRequested = true
         end)
+        settings:Text("Controls: Right Shift closes menu | F3 stops/starts auto-play")
         settings:Combo("chess_opening", "Opening", {"Automatic", "Italian Game", "Sicilian Defense", "French Defense", "Caro-Kann Defense", "Alien Gambit", "Queen's Gambit", "King's Indian Defense", "English Opening"}, 0, function(_, text)
             OPENING_NAME = text
             openingActive = OPENING_NAME ~= "Automatic"
@@ -763,6 +784,7 @@ local function getBoard(forceRefresh)
                 cachedRank1, cachedFile1 = nil, nil
             end
             cachedSquareFolder, cachedPieceFolder = squares, pieces
+            cachedHintFolder = child(board, "Hints")
             return squares, pieces
         end
         wait(0.1)
@@ -816,8 +838,8 @@ function applyPlayAs(color)
     if color ~= "White" and color ~= "Black" and color ~= "Any" then return end
     local oldColor = PLAY_AS
     PLAY_AS = color
-    -- The RoChess square objects already move with the board orientation.
-    -- Do not reverse their chess coordinates a second time.
+    -- S1..S64 retain their chess-square identity even when the visual board
+    -- is rotated for Black. Do not reverse the index here.
     FLIP_BOARD = false
     if oldColor ~= PLAY_AS then
         newGameRequested = true
@@ -929,6 +951,178 @@ local function scan()
     end
     return tokens
 end
+
+local function clickPromotionChoice(kind, fallbackCenter)
+    if not kind then return true end
+    -- RoChess uses image buttons with numeric piece IDs, not text labels.
+    -- These IDs are stable: 2=Knight, 3=Bishop, 4=Rook, 5=Queen.
+    local choiceNames = {Queen = "Choice5", Knight = "Choice2", Rook = "Choice4", Bishop = "Choice3"}
+    local choiceName = choiceNames[tostring(kind)] or choiceNames["Queen"]
+    local deadline = tick() + 1.25
+    while tick() < deadline do
+        local found
+        pcall(function()
+            local gui = player and player:FindFirstChildOfClass("PlayerGui")
+            local chess = gui and gui:FindFirstChild("ChessUI")
+            local root = chess and chess:FindFirstChild("Root")
+            local board = root and root:FindFirstChild("Board")
+            local overlay = board and board:FindFirstChild("Overlay")
+            local column = overlay and overlay:FindFirstChild("PromoColumn")
+            local object = column and column:FindFirstChild(choiceName)
+            if object and object.ClassName == "ImageButton" then
+                local pos, size = object.AbsolutePosition, object.AbsoluteSize
+                local step = 145
+                pcall(function()
+                    local square = boardSquareObjects["a1"]
+                    local squareSize = square and square.AbsoluteSize
+                    if squareSize and squareSize.X > 2 then step = squareSize.X end
+                end)
+                if pos then
+                    local w = (size and size.X > 2) and size.X or step
+                    local h = (size and size.Y > 2) and size.Y or step
+                    found = Vector2.new(pos.X + w / 2, pos.Y + h / 2)
+                end
+            end
+        end)
+        if found then
+            local x, y = math.floor(found.X), math.floor(found.Y)
+            mousemoveabs(x, y)
+            task.wait(0.08)
+            mouse1click()
+            print("[Chess Input] Promotion choice clicked: " .. tostring(kind))
+            task.wait(0.12)
+            return true
+        end
+        task.wait(0.03)
+    end
+    -- Last-resort fallback for a transient UI rebuild. The live lookup above
+    -- remains the authoritative path because the column moves for each file.
+    if fallbackCenter and tostring(kind) == "Queen" then
+        local x, y = math.floor(fallbackCenter.X), math.floor(fallbackCenter.Y)
+        mousemoveabs(x, y)
+        task.wait(0.08)
+        mouse1click()
+        print("[Chess Input] Promotion Queen slot clicked at " .. tostring(x) .. "," .. tostring(y))
+        task.wait(0.12)
+        return true
+    end
+    print("[Chess Input] Promotion choice not found: " .. tostring(kind))
+    return false
+end
+
+local function autoMoveBest(fromSquare, toSquare, promotionKind)
+    if not AUTO_MOVE or AUTO_DETECT_COLOR then return end
+    local selectedSide = PLAY_AS
+    local boardSide = whiteToMove and "White" or "Black"
+    if selectedSide ~= boardSide then
+        initialAnalysisPending = true
+        analysisRetryAt = tick() + 0.10
+        lastAnalysisFen = nil
+        return false
+    end
+    local function liveCenter(squareName)
+        local square = boardSquareObjects[squareName]
+        if square then
+            local ok, position, size = pcall(function()
+                return square.AbsolutePosition, square.AbsoluteSize
+            end)
+            if ok and position and size and size.X >= 2 and size.Y >= 2 then
+                return Vector2.new(position.X + size.X / 2, position.Y + size.Y / 2)
+            end
+        end
+        return boardCenters[squareName]
+    end
+    -- Refresh the square objects before reading their screen coordinates;
+    -- board rotation and new-game layout changes can invalidate cached GUI
+    -- positions between analysis and input.
+    local before = scan()
+    local centerFrom, centerTo = liveCenter(fromSquare), liveCenter(toSquare)
+    if not centerFrom or not centerTo or not cachedHintFolder or not cachedSpacing then return end
+    local movingToken
+    for token, square in pairs(before) do
+        if square == fromSquare and pieceTypes[token]
+            and pieceTypes[token]:sub(1, 5) == selectedSide then
+            movingToken = token
+            break
+        end
+    end
+    if not movingToken then return end
+    local function click(center)
+        if type(setrobloxinput) == "function" then pcall(setrobloxinput, true) end
+        local x = math.floor(center.X + calibrationOffsetX)
+        local y = math.floor(center.Y + calibrationOffsetY)
+        -- Nudge the pointer by a couple of pixels so Matcha/Roblox refreshes
+        -- the GUI hit-test, then return to the exact tile center.
+        mousemoveabs(x + 2, y + 1)
+        task.wait(0.01)
+        mousemoveabs(x - 2, y - 1)
+        task.wait(0.01)
+        mousemoveabs(x, y)
+        task.wait(AUTO_MOVE_DELAY)
+        -- mouse1click is the reliable Matcha hit-test path.  The separate
+        -- press/release pair can use a stale GUI target after mousemoveabs.
+        mouse1click()
+        task.wait(0.05)
+    end
+    click(centerFrom)
+    print("[Chess Input] Source clicked: " .. fromSquare)
+    local target = centerTo
+    local legal = false
+    local hintDeadline = tick() + 1.0
+    while tick() < hintDeadline and not legal do
+        for i = 1, 32 do
+            local hint = child(cachedHintFolder, "Hint" .. tostring(i))
+            if hint then
+                local p = hint.AbsolutePosition
+                local size = hint.AbsoluteSize
+                local hx = p.X + ((size.X > 0 and size.X or cachedSpacing) / 2)
+                local hy = p.Y + ((size.Y > 0 and size.Y or cachedSpacing) / 2)
+                local centerMatch = math.abs(hx - target.X) <= cachedSpacing * 0.35
+                    and math.abs(hy - target.Y) <= cachedSpacing * 0.35
+                local cornerMatch = math.abs(p.X - (target.X - cachedSpacing / 2)) <= cachedSpacing * 0.35
+                    and math.abs(p.Y - (target.Y - cachedSpacing / 2)) <= cachedSpacing * 0.35
+                if centerMatch or cornerMatch then
+                    legal = true
+                    break
+                end
+            end
+        end
+        if not legal then task.wait(0.03) end
+    end
+    print("[Chess Input] Destination hint " .. toSquare .. ": " .. tostring(legal))
+    if not legal then return false end
+    click(centerTo)
+    print("[Chess Input] Destination clicked: " .. toSquare)
+    if promotionKind and not clickPromotionChoice(promotionKind, centerTo) then
+        return false
+    end
+    local deadline = tick() + AUTO_MOVE_CONFIRM_WAIT
+    while tick() < deadline do
+        local ok, after = pcall(scan)
+        local promotionArrived = false
+        if ok and promotionKind then
+            for token, square in pairs(after) do
+                if square == toSquare and pieceTypes[token]
+                    and pieceTypes[token]:sub(1, 5) == selectedSide
+                    and pieceTypes[token]:sub(7) ~= "Pawn" then
+                    promotionArrived = true
+                    break
+                end
+            end
+        end
+        if ok and (after[movingToken] == toSquare or promotionArrived) then
+            -- The confirmed local move changes the turn immediately. Do not
+            -- wait for a later scan to infer this, or the same side can move
+            -- repeatedly from a stale FEN.
+            whiteToMove = selectedSide ~= "White"
+            initialAnalysisPending = false
+            lastAnalysisFen = nil
+            return true
+        end
+        task.wait(0.05)
+    end
+    return false
+end
 local function sameSnapshot(a, b)
     for token, square in pairs(a) do
         if b[token] ~= square then return false end
@@ -999,6 +1193,18 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. ep .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
 
+local function debugDetection(snapshot, label, currentHalfmove, currentFullmove)
+    if not DEBUG_DETECTION then return end
+    local entries = {}
+    for token, square in pairs(snapshot or {}) do
+        entries[#entries + 1] = tostring(square) .. "=" .. tostring(pieceTypes[token] or "?")
+    end
+    table.sort(entries)
+    local fen = makeFen(snapshot, pieceTypes, whiteToMove, currentHalfmove or 0, currentFullmove or 1)
+    print("[DBG Board] " .. tostring(label) .. " pieces=" .. table.concat(entries, ","))
+    print("[DBG FEN] " .. tostring(fen) .. " side=" .. (whiteToMove and "White" or "Black") .. " selected=" .. tostring(PLAY_AS))
+end
+
 local function positionKey(fen)
     return tostring(fen):match("^(%S+ %S+ %S+ %S+)") or tostring(fen)
 end
@@ -1040,14 +1246,6 @@ local function askStockfish(fen, avoidMoves, includeAlternative)
     if not ok or type(result) ~= "table" then return nil, "Invalid API response: " .. tostring(raw) end
     if not result.bestmove then return nil, result.detail or "API returned no best move" end
     return result
-end
-
-local function flipFenTurn(fen)
-    local fields = {}
-    for field in tostring(fen):gmatch("%S+") do fields[#fields + 1] = field end
-    if #fields < 2 then return nil end
-    fields[2] = fields[2] == "w" and "b" or "w"
-    return table.concat(fields, " ")
 end
 
 local function bestMove(fen, snapshot, avoidMoves, includeAlternative)
@@ -1175,14 +1373,24 @@ local function mirrorStep(snapshot)
     end
 end
 
-local whiteToMove = startedAfterOpening and (PLAY_AS == "White") or (not startedAfterOpening)
+whiteToMove = startedAfterOpening and (PLAY_AS == "White") or (not startedAfterOpening)
 local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
 local pendingPromotion = nil
 local analysisRetryAt = 0
 local lastAnalysisFen = nil
 local lastAnalysisAt = 0
-local initialAnalysisEarliest = tick() + 0.75
+-- A failed input must not be reissued against the identical position.  This
+-- is cleared only when a new stable board snapshot is observed.
+local blockedMoveFen = nil
+local blockedMoveUci = nil
+local blockedMoveAttempts = 0
+local rejectedFen = nil
+local initialAnalysisEarliest = tick() + 0.12
+-- Prevent a second analysis from running between our confirmed move and the
+-- opponent's confirmed move.  The board often exposes the two transitions
+-- separately, especially during captures and castling animations.
+local awaitingOpponentMove = false
 local stockfishOnline = true
 local previousWasStartingPosition = false
 do
@@ -1197,17 +1405,22 @@ local function resetForNewGame(snapshot, atStartingPosition, detectedTypes)
         inferMissingPiece(snapshot, pieceTypes)
     end
     previous = snapshot
-    whiteToMove = (PLAY_AS == "Black" and not atStartingPosition) and false or true
+    -- A fresh game is White-to-move unless the selected/detected side is Black.
+    -- Preserve the actual side-to-move when resetting from a mid-game scan.
+    whiteToMove = atStartingPosition and true or (PLAY_AS ~= "Black" and whiteToMove)
     halfmove, fullmove = 0, 1
     castlingRights, enPassantTarget = "KQkq", "-"
     awaitingImport = false
     initialAnalysisPending = true
-    initialAnalysisEarliest = tick() + 0.75
+    initialAnalysisEarliest = tick() + 0.12
+    awaitingOpponentMove = false
     analysisRetryAt = tick()
     pendingFen = nil
     pendingPromotion = nil
     positionCounts = {}
     lastPlayedUci = nil
+    blockedMoveFen, blockedMoveUci, blockedMoveAttempts = nil, nil, 0
+    rejectedFen = nil
     lastProcessedMoveUci = nil
     lastProcessedMoveAt = 0
     lastRepetitionWarningKey = nil
@@ -1252,36 +1465,38 @@ describeAnalysisError = function(errorMessage)
     return "Analysis failed: " .. message
 end
 
-local function recommend(snapshot)
+local function recommend(snapshot, previewOnly)
     local ready, reason = positionReady(snapshot)
     if not ready then
         analysisRetryAt = tick() + 0.35
         return false
     end
-    local fen = makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
-    local result, errorMessage = bestMove(fen, snapshot, nil, not premove)
-    if (not result or not result.bestmove) and tostring(errorMessage):lower():find("illegal") then
-        local alternateFen = flipFenTurn(fen)
-        if alternateFen then
-            local alternateResult, alternateError = bestMove(alternateFen, snapshot, nil, not premove)
-            if alternateResult and alternateResult.bestmove then
-                whiteToMove = not whiteToMove
-                fen = alternateFen
-                result, errorMessage = alternateResult, nil
-                print("[DBG] TURN corrected after illegal-FEN retry|t=" .. (whiteToMove and "w" or "b"))
-            else
-                errorMessage = alternateError or errorMessage
-            end
-        end
+    local analysisWhiteToMove = previewOnly and (PLAY_AS == "White") or (not previewOnly and whiteToMove)
+    local premove = previewOnly or isPremovePosition(whiteToMove)
+    local fen = makeFen(snapshot, pieceTypes, analysisWhiteToMove, halfmove, fullmove)
+    if rejectedFen == fen then
+        analysisRetryAt = tick() + 0.20
+        return false
     end
+    if blockedMoveFen == fen and blockedMoveAttempts >= 2 then
+        analysisRetryAt = tick() + 0.15
+        return false
+    end
+    local result, errorMessage = bestMove(fen, snapshot, nil, not premove)
+    -- Never repair an illegal FEN by flipping the side to move.  During a
+    -- capture, promotion, or castling animation the board can expose a
+    -- transient frame; flipping here can produce a legal-looking move for
+    -- the opponent's piece.  Keep the current turn and retry after the next
+    -- stable scan instead.
     if not result or not result.bestmove then
         print("[DBG] REJECT|fen=" .. tostring(fen) .. "|t=" .. (whiteToMove and "w" or "b") .. "|cr=" .. tostring(castlingRights) .. "|ep=" .. tostring(enPassantTarget) .. "|err=" .. tostring(errorMessage))
         local rejectText = string.lower(tostring(errorMessage or ""))
         if string.find(rejectText, "illegal") or string.find(rejectText, "invalid fen") then
-            -- A capture/premove can expose one transitional frame. Do not mark
-            -- the engine offline or pause for seconds; retry the same position
-            -- after the board settles.
+            -- A capture/promotion/castling transition can expose one invalid
+            -- frame. Keep the engine online, but suppress this exact FEN until
+            -- the board produces a new stable position.
             analysisRetryAt = tick() + 0.12
+            rejectedFen = fen
             return false
         end
         updateStockfishStatus(false, errorMessage)
@@ -1291,6 +1506,22 @@ local function recommend(snapshot)
     end
     updateStockfishStatus(true)
     local fromSquare, toSquare = result.bestmove:sub(1, 2), result.bestmove:sub(3, 4)
+    if DEBUG_DETECTION then
+        print("[DBG Move] best=" .. tostring(result.bestmove) .. " source=" .. tostring(fromSquare) .. " target=" .. tostring(toSquare))
+    end
+    local sourceMatchesSide = false
+    for token, square in pairs(snapshot) do
+        if square == fromSquare and pieceTypes[token]
+            and pieceTypes[token]:sub(1, 5) == PLAY_AS then
+            sourceMatchesSide = true
+            break
+        end
+    end
+    if (PLAY_AS == "White" or PLAY_AS == "Black") and not sourceMatchesSide then
+        print("[Chess Detect] Ignored move from wrong-colored piece: " .. tostring(result.bestmove))
+        analysisRetryAt = tick() + 0.15
+        return false
+    end
     local wantedPiece = "Unknown piece"
     for token, square in pairs(snapshot) do
         if square == fromSquare and pieceTypes[token] then
@@ -1306,6 +1537,9 @@ local function recommend(snapshot)
     local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
     local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
     removeArrow()
+    if not boardCenters[fromSquare] or not boardCenters[toSquare] then
+        pcall(scan)
+    end
     local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
     showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
     showPrimaryTileOutlines(fromSquare, toSquare)
@@ -1313,6 +1547,27 @@ local function recommend(snapshot)
         local altPromotion = promotionNames[result.alternative:sub(5, 5):lower()]
         local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
         showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
+    end
+    if not premove then
+        task.wait(AUTO_MOVE_ARROW_HOLD)
+        local moved = autoMoveBest(fromSquare, toSquare, promotionNames[promotion])
+        if not moved then
+            print("[Chess Input] Move not confirmed; keeping the position pending")
+            if blockedMoveFen == fen and blockedMoveUci == result.bestmove then
+                blockedMoveAttempts = blockedMoveAttempts + 1
+            else
+                blockedMoveFen, blockedMoveUci = fen, result.bestmove
+                blockedMoveAttempts = 1
+            end
+            initialAnalysisPending = true
+            analysisRetryAt = tick() + 0.12
+            return false
+        end
+        -- The click is confirmed, so the next analysis must wait for the
+        -- opponent's board transition.  Update the logical side immediately
+        -- so the initial-analysis path cannot race ahead of the scan loop.
+        awaitingOpponentMove = true
+        whiteToMove = PLAY_AS == "Black"
     end
     local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
     local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
@@ -1338,7 +1593,15 @@ local function settleSnapshot(firstSnapshot)
     return stableScans >= SETTLE_STABLE_SCANS, latest
 end
 
-while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
+while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
+    local autoMoveKeyDown = false
+    pcall(function() autoMoveKeyDown = iskeypressed(AUTO_MOVE_HOTKEY) end)
+    if autoMoveKeyDown and not autoMoveKeyWasDown then
+        AUTO_MOVE = not AUTO_MOVE
+        print("[Chess Input] Auto-move " .. (AUTO_MOVE and "enabled" or "disabled"))
+        pcall(function() notify("RoChess", "Auto-move " .. (AUTO_MOVE and "enabled" or "disabled"), 3) end)
+    end
+    autoMoveKeyWasDown = autoMoveKeyDown
     checkAnnouncement()
     if customUI and useCustomUI then customUI:step() end
     if not useCustomUI and UI and UI.GetValue then
@@ -1378,11 +1641,47 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             end
             if colorCandidateCount >= 2 then
                 if detected ~= PLAY_AS then
-                applyPlayAs(detected)
-                print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
+                    -- Automatic detection must not trigger the manual
+                    -- new-game reset; it only changes the selected side.
+                    PLAY_AS = detected
+                    -- A newly detected Black game still starts with White to
+                    -- move.  Prime the initial Black recommendation for the
+                    -- arrows, but never treat it as Black's turn for input.
+                    if detected == "Black" and previousWasStartingPosition then
+                        whiteToMove = true
+                    end
+                    FLIP_BOARD = false
+                    boardCenters = {}
+                    cachedSquares = nil
+                    cachedSpacing = nil
+                    -- A side change normally accompanies a resign/new game.
+                    -- Do not reuse token-to-piece identities from the prior
+                    -- board; doing so can turn e1 into a stale Queen, etc.
+                    pieceTypes = {}
+                    previous = {}
+                    previousWasStartingPosition = false
+                    newGameRequested = true
+                    awaitingOpponentMove = false
+                    blockedMoveFen, blockedMoveUci, blockedMoveAttempts = nil, nil, 0
+                    rejectedFen = nil
+                    lastProcessedMoveUci, lastProcessedMoveAt = nil, 0
+                    lastPlayedUci = nil
+                    positionCounts = {}
+                    whiteToMove = true
+                    halfmove, fullmove = 0, 1
+                    castlingRights, enPassantTarget = "KQkq", "-"
+                    lastAnalysisFen = nil
+                    removeArrow()
+                    print("[Chess Detect] Automatically detected player color: " .. PLAY_AS)
                 end
                 -- Lock only after two matching reads from the same board.
                 AUTO_DETECT_COLOR = false
+                if detected == "Black" then analysisRetryAt = 0 end
+                removeArrow()
+                initialAnalysisPending = true
+                analysisRetryAt = 0
+                initialAnalysisEarliest = tick() + 0.15
+                lastAnalysisFen = nil
             end
         end
     end
@@ -1438,7 +1737,9 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         lastPlayedUci = nil
         lastProcessedMoveUci, lastProcessedMoveAt = nil, 0
         previous = current
-        if PLAY_AS == "Black" and not atStartingPosition then
+        if atStartingPosition then
+            whiteToMove = true
+        elseif PLAY_AS == "Black" then
             whiteToMove = false
         else
             whiteToMove = true
@@ -1447,6 +1748,7 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         castlingRights, enPassantTarget = "KQkq", "-"
         awaitingImport = false
         initialAnalysisPending = true
+        awaitingOpponentMove = false
         pendingFen = nil
             moveHistory = {}
             openingActive = false
@@ -1518,21 +1820,32 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
     elseif awaitingImport then
         continue
     end
-    if initialAnalysisPending then
-        local shouldAnalyze = SHOW_OUT_OF_TURN or PLAY_AS == "Any"
+    if initialAnalysisPending and not awaitingOpponentMove then
+        local shouldAnalyze = not AUTO_DETECT_COLOR and (SHOW_OUT_OF_TURN or PLAY_AS == "Any"
             or (PLAY_AS == "White" and whiteToMove)
             or (PLAY_AS == "Black" and not whiteToMove)
+            or (PLAY_AS == "Black" and whiteToMove))
         if shouldAnalyze then
-            if tick() >= initialAnalysisEarliest and tick() >= analysisRetryAt and recommend(previous) then
+            local previewOnly = PLAY_AS == "Black" and whiteToMove
+            if tick() >= initialAnalysisEarliest and tick() >= analysisRetryAt and recommend(previous, previewOnly) then
                 initialAnalysisPending = false
             end
         else
-            initialAnalysisPending = false
+            -- Keep the initial analysis pending while waiting for the
+            -- opponent's first move. Black starts with White to move, so
+            -- cancelling here permanently skipped the first Black analysis.
+            initialAnalysisPending = true
         end
     end
     if success and not sameSnapshot(previous, current) then
         local stable, confirmed = settleSnapshot(current)
         if stable then
+            -- Any stable board change permits a fresh candidate.  A failed
+            -- click is quarantined only for the unchanged position.
+            blockedMoveFen, blockedMoveUci, blockedMoveAttempts = nil, nil, 0
+            if rejectedFen then
+                rejectedFen = nil
+            end
             local moved, capture = {}, false
             local added, removed = {}, {}
             for token, newSquare in pairs(confirmed) do
@@ -1576,6 +1889,35 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
             if castleStillAnimating then
                 wait(SETTLE_DELAY)
                 continue
+            end
+            -- A board update may not produce exactly one `moved` record:
+            -- captures remove a token, castling can move two tokens, and a
+            -- promotion can replace a pawn token.  While waiting after our
+            -- move, any stable change involving an opposing-color token is
+            -- enough to unlock analysis.
+            if awaitingOpponentMove then
+                local opponentTransition = false
+                for _, candidate in ipairs(moved) do
+                    if candidate.piece and candidate.piece:sub(1, 5) ~= PLAY_AS then
+                        opponentTransition = true
+                        break
+                    end
+                end
+                if not opponentTransition then
+                    for _, gone in ipairs(removed) do
+                        if gone.piece and gone.piece:sub(1, 5) ~= PLAY_AS then
+                            opponentTransition = true
+                            break
+                        end
+                    end
+                end
+                if opponentTransition then
+                    awaitingOpponentMove = false
+                    whiteToMove = PLAY_AS ~= "Black"
+                    initialAnalysisPending = true
+                    analysisRetryAt = 0
+                    print("[Chess Detect] Opponent board change confirmed; analysis unlocked")
+                end
             end
             local promotionCandidate = (#added == 1)
             if promotionCandidate then
@@ -1709,6 +2051,17 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 lastProcessedMoveUci = playedUci
                 lastProcessedMoveAt = tick()
                 whiteToMove = not (move.piece and move.piece:sub(1, 5) == "White")
+                if PLAY_AS == "Black" and move.piece and move.piece:sub(1, 5) == "White" then
+                    whiteToMove = false
+                    initialAnalysisPending = true
+                    analysisRetryAt = 0
+                end
+                if awaitingOpponentMove and move.piece
+                    and move.piece:sub(1, 5) ~= PLAY_AS then
+                    awaitingOpponentMove = false
+                    print("[Chess Detect] Opponent move confirmed; analysis unlocked")
+                end
+                debugDetection(confirmed, "after turn update", halfmove, fullmove)
                 if wasPawn or capture then
                     halfmove = 0
                 else
@@ -1731,6 +2084,12 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                 local yourTurn = SHOW_OUT_OF_TURN or PLAY_AS == "Any"
                     or (PLAY_AS == "White" and whiteToMove)
                     or (PLAY_AS == "Black" and not whiteToMove)
+                if not yourTurn then
+                    -- Keep the last confirmed arrow visible while waiting for
+                    -- the opponent. A new confirmed position replaces it.
+                    previous = confirmed
+                    continue
+                end
                 if yourTurn then
                     local ready = positionReady(confirmed)
                     local result, errorMessage
@@ -1743,22 +2102,46 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         else
                             lastAnalysisFen = fen
                             lastAnalysisAt = tick()
-                            result, errorMessage = bestMove(fen, confirmed, avoidMoves, not premove)
-                            if result and result.bestmove then
-                            else
+                            if rejectedFen ~= fen
+                                and (blockedMoveFen ~= fen or blockedMoveAttempts < 2) then
+                                result, errorMessage = bestMove(fen, confirmed, avoidMoves, not premove)
                             end
                         end
-                    else
                     end
                     if result then
                         local fresh, latest = pcall(scan)
                         if not fresh or not sameSnapshot(confirmed, latest) then
                             result = nil
-                            removeArrow()
                         end
                     end
                     if result then
                         updateStockfishStatus(true)
+                        if type(result.bestmove) ~= "string" or #result.bestmove < 4 then
+                            print("[Chess Detect] Ignored malformed Stockfish move: " .. tostring(result.bestmove))
+                            initialAnalysisPending = true
+                            analysisRetryAt = tick() + 0.15
+                            result = nil
+                        end
+                    end
+                    if result then
+                        local fromSquare = result.bestmove:sub(1, 2)
+                        local toSquare = result.bestmove:sub(3, 4)
+                        local sourceMatchesSide = false
+                        for token, square in pairs(confirmed) do
+                            if square == fromSquare and pieceTypes[token]
+                                and pieceTypes[token]:sub(1, 5) == PLAY_AS then
+                                sourceMatchesSide = true
+                                break
+                            end
+                        end
+                        if (PLAY_AS == "White" or PLAY_AS == "Black") and not sourceMatchesSide then
+                            print("[Chess Detect] Ignored wrong-colored result: " .. tostring(result.bestmove))
+                            initialAnalysisPending = true
+                            analysisRetryAt = tick() + 0.15
+                            result = nil
+                        end
+                    end
+                    if result then
                         local fromSquare = result.bestmove:sub(1, 2)
                         local toSquare = result.bestmove:sub(3, 4)
                         local wantedPiece = "Unknown piece"
@@ -1772,6 +2155,9 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                         local suffix = promotionNames[promotion] and " (promote to " .. promotionNames[promotion] .. ")" or ""
                         local message = string.format("Move %s: %s -> %s%s", wantedPiece, fromSquare, toSquare, suffix)
                         removeArrow()
+                        if not boardCenters[fromSquare] or not boardCenters[toSquare] then
+                            pcall(scan)
+                        end
                         local promotionLabel = promotionNames[promotion] and "PROMOTE TO " .. string.upper(promotionNames[promotion]) or nil
                         showArrow(fromSquare, toSquare, primaryArrowColor(whiteToMove), promotionLabel)
                         showPrimaryTileOutlines(fromSquare, toSquare)
@@ -1780,12 +2166,32 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                             local altLabel = altPromotion and "PROMOTE TO " .. string.upper(altPromotion) or nil
                             showArrow(result.alternative:sub(1, 2), result.alternative:sub(3, 4), Color3.fromRGB(70, 140, 255), altLabel)
                         end
+                        if not premove then
+                            task.wait(AUTO_MOVE_ARROW_HOLD)
+                            local moved = autoMoveBest(fromSquare, toSquare, promotionNames[promotion])
+                            if not moved then
+                                print("[Chess Input] Move not confirmed; retrying board detection")
+                                if blockedMoveFen == fen and blockedMoveUci == result.bestmove then
+                                    blockedMoveAttempts = blockedMoveAttempts + 1
+                                else
+                                    blockedMoveFen, blockedMoveUci = fen, result.bestmove
+                                    blockedMoveAttempts = 1
+                                end
+                                initialAnalysisPending = true
+                                analysisRetryAt = tick() + 0.12
+                                previous = confirmed
+                                continue
+                            end
+                            awaitingOpponentMove = true
+                            whiteToMove = PLAY_AS == "Black"
+                        end
                         local engineName = ENGINE == "maia" and "Maia" or "Stockfish"
                         local backend = result.backend == "opening" and "Opening" or (result.backend == "local" and "Local" or "Render")
                         print("[" .. engineName .. " " .. backend .. "] " .. message)
                     elseif errorMessage then
                         local errorText = string.lower(tostring(errorMessage))
                         if string.find(errorText, "illegal") or string.find(errorText, "invalid fen") then
+                            rejectedFen = fen
                             initialAnalysisPending = true
                             analysisRetryAt = tick() + 0.12
                             print("[Chess Detect] Board transition detected; retrying analysis")
@@ -1801,5 +2207,8 @@ while _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         end
     end
 end
+
+
+
 
 
