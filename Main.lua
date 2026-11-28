@@ -19,17 +19,16 @@ local API_URL = "https://rochess-gateway-seven.vercel.app/api/analyze"
 local STATUS_URL = "https://rochess-gateway-seven.vercel.app/api/health"
 local STATUS_INTERVAL = 10
 local API_KEY = ""
-local ANALYSIS_DEPTH = 10
 local STRENGTH = "high"
 local PLAY_STYLE = "standard"
 local ENGINE = "stockfish"
-local DEBUG_DETECTION = false
 local SECOND_MOVE_ENABLED = true
 local MAX_STOCKFISH = false
 local SHOW_OUT_OF_TURN = false
 local AUTO_MOVE = false
 local AUTO_MOVE_HOTKEY = 114 -- F3 for Matcha iskeypressed
 local autoMoveKeyWasDown = false
+local gameOverLatched = false
 local AUTO_MOVE_DELAY = 0.20
 local AUTO_MOVE_ARROW_HOLD = 0.30
 local AUTO_MOVE_CONFIRM_WAIT = 2.0
@@ -72,13 +71,16 @@ local cachedRank1, cachedFile1
 local arrows = {}
 local startupSplash
 local startupSplashSubtitle
+local startupSplashMenuHint
 
 local function showAutoMoveSplash(enabled)
     pcall(function()
         if startupSplash then startupSplash:Remove() end
         if startupSplashSubtitle then startupSplashSubtitle:Remove() end
+        if startupSplashMenuHint then startupSplashMenuHint:Remove() end
         startupSplash = Drawing.new("Text")
         startupSplashSubtitle = Drawing.new("Text")
+        startupSplashMenuHint = Drawing.new("Text")
         local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
         local x = viewport and math.max(420, viewport.X - 360) or 1450
         startupSplash.Text = enabled and "AUTO-MOVE ENABLED" or "AUTO-MOVE DISABLED"
@@ -97,6 +99,13 @@ local function showAutoMoveSplash(enabled)
         startupSplashSubtitle.Outline = true
         startupSplashSubtitle.Center = false
         startupSplashSubtitle.Visible = true
+        startupSplashMenuHint.Text = "RIGHT SHIFT = MENU"
+        startupSplashMenuHint.Position = Vector2.new(x, 170)
+        startupSplashMenuHint.Size = 19
+        startupSplashMenuHint.Color = Color3.fromRGB(235, 235, 235)
+        startupSplashMenuHint.Outline = true
+        startupSplashMenuHint.Center = false
+        startupSplashMenuHint.Visible = true
         task.delay(6, function()
             if startupSplash then
                 pcall(function() startupSplash:Remove() end)
@@ -106,8 +115,40 @@ local function showAutoMoveSplash(enabled)
                 pcall(function() startupSplashSubtitle:Remove() end)
                 startupSplashSubtitle = nil
             end
+            if startupSplashMenuHint then
+                pcall(function() startupSplashMenuHint:Remove() end)
+                startupSplashMenuHint = nil
+            end
         end)
     end)
+end
+
+local function gameOverDetected()
+    local detected = false
+    pcall(function()
+        local gui = player and player:FindFirstChildOfClass("PlayerGui")
+        local chess = gui and gui:FindFirstChild("ChessUI")
+        local modals = chess and chess:FindFirstChild("Modals")
+        local modal = modals and (modals:FindFirstChild("GameOver") or modals:FindFirstChild("GameResult"))
+        if not modal then return end
+        local text = ""
+        for _, object in ipairs(modal:GetDescendants()) do
+            if object.ClassName == "TextLabel" or object.ClassName == "TextButton" then
+                local value = tostring(object.Text or "")
+                if value ~= "" then text = text .. " " .. string.lower(value) end
+            end
+        end
+        detected = string.find(text, "draw", 1, true) ~= nil
+            or string.find(text, "repetition", 1, true) ~= nil
+            or string.find(text, "stalemate", 1, true) ~= nil
+            or string.find(text, "checkmate", 1, true) ~= nil
+            or string.find(text, "wins", 1, true) ~= nil
+            or string.find(text, "won", 1, true) ~= nil
+            or string.find(text, "resign", 1, true) ~= nil
+            or string.find(text, "timeout", 1, true) ~= nil
+            or string.find(text, "time out", 1, true) ~= nil
+    end)
+    return detected
 end
 local applyPlayAs
 local newGameRequested = false
@@ -262,7 +303,6 @@ local function saveCalibration(signature)
         }))
     end)
     pcall(function()
-        notify("RoChess", "Board alignment calibrated", 3)
     end)
 end
 
@@ -483,6 +523,8 @@ local function setupInterfaceChoice()
     pcall(function() jdui:SetTitle("RoChess") end)
     pcall(function() jdui:SetSubtitle("") end)
     pcall(function() jdui:SetEffects(false) end)
+    -- Start hidden; Right Shift remains the menu toggle key.
+    pcall(function() jdui:SetOpen(false) end)
     main:Select()
     return true
 end
@@ -1240,18 +1282,6 @@ local function makeFen(snapshot, pieceTypes, whiteToMove, halfmove, fullmove)
     return table.concat(ranks, "/") .. " " .. (whiteToMove and "w" or "b") .. " " .. rights .. " " .. ep .. " " .. tostring(halfmove) .. " " .. tostring(fullmove)
 end
 
-local function debugDetection(snapshot, label, currentHalfmove, currentFullmove)
-    if not DEBUG_DETECTION then return end
-    local entries = {}
-    for token, square in pairs(snapshot or {}) do
-        entries[#entries + 1] = tostring(square) .. "=" .. tostring(pieceTypes[token] or "?")
-    end
-    table.sort(entries)
-    local fen = makeFen(snapshot, pieceTypes, whiteToMove, currentHalfmove or 0, currentFullmove or 1)
-    print("[DBG Board] " .. tostring(label) .. " pieces=" .. table.concat(entries, ","))
-    print("[DBG FEN] " .. tostring(fen) .. " side=" .. (whiteToMove and "White" or "Black") .. " selected=" .. tostring(PLAY_AS))
-end
-
 local function positionKey(fen)
     return tostring(fen):match("^(%S+ %S+ %S+ %S+)") or tostring(fen)
 end
@@ -1372,55 +1402,6 @@ end
 
 local awaitingImport = known ~= 32
 
-local mirrorVisible, mirrorKeyDown, mirrorNextDraw = true, false, 0
-local mirrorObjects, mirrorLastKey = {}, nil
-local mirrorX, mirrorY, mirrorSize = 70, 110, 420
-local mirrorChars = {Pawn="P", Knight="N", Bishop="B", Rook="R", Queen="Q", King="K"}
-local function mirrorClear()
-    for _, object in ipairs(mirrorObjects) do pcall(function() object:Remove() end) end
-    mirrorObjects = {}
-end
-local function mirrorAdd(kind, props)
-    local object = Drawing.new(kind)
-    for key, value in pairs(props) do pcall(function() object[key] = value end) end
-    mirrorObjects[#mirrorObjects + 1] = object
-end
-local function mirrorDraw(snapshot)
-    if not Drawing or not mirrorVisible then mirrorClear(); return end
-    local state = {}
-    for token, square in pairs(snapshot or {}) do state[#state+1] = tostring(square) .. tostring(pieceTypes[token] or "") end
-    table.sort(state)
-    local key = table.concat(state, "|") .. tostring(mirrorX) .. tostring(mirrorY) .. tostring(mirrorSize)
-    if key == mirrorLastKey then return end
-    mirrorLastKey = key
-    mirrorClear()
-    local cell = mirrorSize / 8
-    mirrorAdd("Square", {Position=Vector2.new(mirrorX-4,mirrorY-38),Size=Vector2.new(mirrorSize+8,mirrorSize+44),Color=Color3.fromRGB(16,20,29),Filled=true,Visible=true,ZIndex=20})
-    mirrorAdd("Text", {Text="Live Position Mirror",Position=Vector2.new(mirrorX+10,mirrorY-27),Size=16,Color=Color3.fromRGB(240,244,250),Outline=true,Visible=true,ZIndex=42})
-    for rank=8,1,-1 do for file=1,8 do
-        local square=string.char(96+file)..rank; local px=mirrorX+(file-1)*cell; local py=mirrorY+(8-rank)*cell
-        mirrorAdd("Square",{Position=Vector2.new(px,py),Size=Vector2.new(cell,cell),Color=((file+rank)%2==0) and Color3.fromRGB(224,232,242) or Color3.fromRGB(91,123,153),Filled=true,Visible=true,ZIndex=30})
-    end end
-    for token,square in pairs(snapshot or {}) do
-        local piece=pieceTypes[token]; local file,rank=square:match("^([a-h])([1-8])$")
-        if piece and file and rank then
-            local px=mirrorX+(string.byte(file)-97)*cell+cell/2; local py=mirrorY+(8-tonumber(rank))*cell+cell/2-14
-            mirrorAdd("Text",{Text=mirrorChars[piece:sub(7)] or "?",Position=Vector2.new(px,py),Size=30,Center=true,Color=piece:sub(1,5)=="White" and Color3.fromRGB(250,250,250) or Color3.fromRGB(20,22,28),Outline=true,Visible=true,ZIndex=42})
-        end
-    end
-    mirrorAdd("Text",{Text="F8 hide/show | live detector state",Position=Vector2.new(mirrorX,mirrorY+mirrorSize+8),Size=12,Color=Color3.fromRGB(205,215,230),Outline=true,Visible=true,ZIndex=42})
-end
-local function mirrorStep(snapshot)
-    local down=false; pcall(function() down=game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.F8) end)
-    if down and not mirrorKeyDown then mirrorVisible=not mirrorVisible; mirrorLastKey=nil end
-    mirrorKeyDown=down
-    local now=tick()
-    if now >= mirrorNextDraw then
-        mirrorNextDraw=now+0.15
-        mirrorDraw(snapshot)
-    end
-end
-
 whiteToMove = startedAfterOpening and (PLAY_AS == "White") or (not startedAfterOpening)
 local halfmove, fullmove = 0, startedAfterOpening and 2 or 1
 local initialAnalysisPending = true
@@ -1485,14 +1466,15 @@ local function updateStockfishStatus(online, detail)
     stockfishOnline = online
     if online then
         print("[Stockfish] service is back online")
-        pcall(function() notify("Stockfish", "Service is back online", 5) end)
     else
         local message = describeAnalysisError(detail)
         if detail and tostring(detail) ~= "" then
             message = message .. " (" .. tostring(detail) .. ")"
         end
         print("[Stockfish] " .. message)
-        pcall(function() notify("Stockfish", message, 8) end)
+        if message ~= "Game over: no legal moves" then
+            pcall(function() notify("Stockfish", message, 8) end)
+        end
     end
 end
 
@@ -1553,9 +1535,6 @@ local function recommend(snapshot, previewOnly)
     end
     updateStockfishStatus(true)
     local fromSquare, toSquare = result.bestmove:sub(1, 2), result.bestmove:sub(3, 4)
-    if DEBUG_DETECTION then
-        print("[DBG Move] best=" .. tostring(result.bestmove) .. " source=" .. tostring(fromSquare) .. " target=" .. tostring(toSquare))
-    end
     local sourceMatchesSide = false
     for token, square in pairs(snapshot) do
         if square == fromSquare and pieceTypes[token]
@@ -1661,6 +1640,18 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
         pcall(function() notify("RoChess", "Auto-move " .. (AUTO_MOVE and "enabled" or "disabled"), 3) end)
     end
     autoMoveKeyWasDown = autoMoveKeyDown
+    local gameOver = gameOverDetected()
+    if gameOver then
+        if not gameOverLatched then
+            gameOverLatched = true
+            AUTO_MOVE = false
+            initialAnalysisPending = false
+            removeArrow()
+            showAutoMoveSplash(false)
+        end
+    else
+        gameOverLatched = false
+    end
     checkAnnouncement()
     if customUI and useCustomUI then customUI:step() end
     if not useCustomUI and UI and UI.GetValue then
@@ -2118,7 +2109,6 @@ while sessionAlive and _G.__ROCHESS_SESSION == ROCHESS_SESSION do
                     and move.piece:sub(1, 5) ~= PLAY_AS then
                     awaitingOpponentMove = false
                 end
-                debugDetection(confirmed, "after turn update", halfmove, fullmove)
                 if wasPawn or capture then
                     halfmove = 0
                 else
